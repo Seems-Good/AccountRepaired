@@ -1,4 +1,4 @@
-## Interface: 11508, 20505, 50503, 120000, 120001, 120005
+## Interface: 120000, 120001, 120005
 ## Version: @project-version@
 ## Title: Account Repaired
 ## Notes: Track gold spent on repairs per character, grouped by armor type (/arepaired show)
@@ -7,6 +7,7 @@
 
 ## X-License: Licensed under the MIT License.
 ## X-Website: https://github.com/Seems-Good/AccountRepaired
+## X-Curse-Project-ID: 1517434
 
 Libs\LibStub.lua
 Libs\CallbackHandler-1.0.lua
