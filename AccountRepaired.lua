@@ -22,13 +22,18 @@ local AR = AccountRepaired
 --------------------------------------------------
 AccountRepairedDB     = AccountRepairedDB or {}
 AccountRepairedPopupDB = AccountRepairedPopupDB or {
-    width  = 540,
-    height = 340,
-    point  = "CENTER",
-    x      = 0,
-    y      = 0,
-    period = "all",
+    width         = 540,
+    height        = 340,
+    point         = "CENTER",
+    x             = 0,
+    y             = 0,
+    period        = "all",
+    includeGuild  = true,
 }
+-- Back-fill default for existing saved databases
+if AccountRepairedPopupDB.includeGuild == nil then
+    AccountRepairedPopupDB.includeGuild = true
+end
 
 --------------------------------------------------
 -- Constants
@@ -69,9 +74,10 @@ AR.charPanel        = nil
 AR.charPanelArmor   = nil   -- which armor type is currently pinned in the panel
 AR.currentPeriod    = AccountRepairedPopupDB.period or "all"
 
-local inMerchant   = false
-local lastMoney    = 0
-local repairPending = false
+local inMerchant        = false
+local lastMoney         = 0
+local repairPending     = false
+local snappedRepairCost = 0   -- GetRepairAllCost() cached before RepairAllItems fires
 
 --------------------------------------------------
 -- Helpers – Character identity
@@ -142,7 +148,7 @@ local function FormatGoldShort(copper)
     if copper <= 0 then return "|cffAAAAAA0g|r" end
     local goldVal = copper / 10000
     if goldVal >= 1000 then
-        return string.format("|cffFFD700%.1fk|rg", goldVal / 1000)
+        return string.format("|cffFFD700%.1fk|r", goldVal / 1000)
     elseif goldVal >= 1 then
         return string.format("|cffFFD700%.1f|rg", goldVal)
     end
@@ -179,9 +185,12 @@ end
 local function GetCharRepairsInPeriod(charData, periodStart)
     local total = 0
     if not charData or not charData.repairs then return 0 end
+    local includeGuild = AccountRepairedPopupDB.includeGuild ~= false
     for _, entry in ipairs(charData.repairs) do
         if (entry.t or 0) >= periodStart then
-            total = total + (entry.g or 0)
+            if not entry.guild or includeGuild then
+                total = total + (entry.g or 0)
+            end
         end
     end
     return total
@@ -231,16 +240,19 @@ local function GetCurrentCharAllPeriods()
     local realm, name = GetCharInfo()
     local charData    = AccountRepairedDB[GetCharKey(realm, name)]
     local stats = { day = 0, week = 0, month = 0, all = 0 }
+    local includeGuild = AccountRepairedPopupDB.includeGuild ~= false
 
     if charData and charData.repairs then
         local now = time()
         for _, entry in ipairs(charData.repairs) do
             local t = entry.t or 0
             local g = entry.g or 0
-            stats.all   = stats.all + g
-            if t >= now - 86400   then stats.day   = stats.day   + g end
-            if t >= now - 604800  then stats.week  = stats.week  + g end
-            if t >= now - 2592000 then stats.month = stats.month + g end
+            if not entry.guild or includeGuild then
+                stats.all   = stats.all + g
+                if t >= now - 86400   then stats.day   = stats.day   + g end
+                if t >= now - 604800  then stats.week  = stats.week  + g end
+                if t >= now - 2592000 then stats.month = stats.month + g end
+            end
         end
     end
     return stats, charData
@@ -250,7 +262,7 @@ end
 -- Core: Record a repair event
 --------------------------------------------------
 
-local function RecordRepair(copper)
+local function RecordRepair(copper, isGuild)
     if copper <= 0 then return end
 
     local realm, name = GetCharInfo()
@@ -273,7 +285,9 @@ local function RecordRepair(copper)
     end
     charData.armorType = charData.armorType or "Unknown"
 
-    table.insert(charData.repairs, { t = time(), g = copper })
+    local entry = { t = time(), g = copper }
+    if isGuild then entry.guild = true end
+    table.insert(charData.repairs, entry)
 
     -- Prune entries older than DATA_RETENTION_SECONDS
     local cutoff = time() - DATA_RETENTION_SECONDS
@@ -295,6 +309,7 @@ AR.mainFrame:RegisterEvent("PLAYER_LOGIN")
 AR.mainFrame:RegisterEvent("MERCHANT_SHOW")
 AR.mainFrame:RegisterEvent("MERCHANT_CLOSED")
 AR.mainFrame:RegisterEvent("PLAYER_MONEY")
+AR.mainFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 
 AR.mainFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
@@ -312,23 +327,34 @@ AR.mainFrame:SetScript("OnEvent", function(self, event, ...)
         end)
 
     elseif event == "MERCHANT_SHOW" then
-        inMerchant   = true
-        lastMoney    = GetMoney()
-        repairPending = false
+        inMerchant          = true
+        lastMoney           = GetMoney()
+        repairPending       = false
+        snappedRepairCost   = GetRepairAllCost()
 
     elseif event == "MERCHANT_CLOSED" then
-        inMerchant    = false
-        repairPending = false
+        inMerchant          = false
+        repairPending       = false
+        snappedRepairCost   = 0
+
+    elseif event == "PLAYER_EQUIPMENT_CHANGED" then
+        -- Keep repair-cost snapshot fresh if gear changes while at a vendor
+        if inMerchant then
+            snappedRepairCost = GetRepairAllCost()
+        end
 
     elseif event == "PLAYER_MONEY" then
         if inMerchant and repairPending then
             local currentMoney = GetMoney()
             local delta        = lastMoney - currentMoney
             if delta > 0 then
-                RecordRepair(delta)
+                RecordRepair(delta, false)
             end
-            repairPending = false
-            lastMoney     = currentMoney
+            repairPending       = false
+            lastMoney           = currentMoney
+            -- Items are now repaired; update snapshot so a subsequent guild
+            -- repair (unlikely but possible) doesn't re-record a stale cost.
+            snappedRepairCost   = GetRepairAllCost()
         elseif inMerchant then
             -- Keep lastMoney current between non-repair money changes
             -- (e.g. the player bought something) so the NEXT repair delta is accurate.
@@ -825,6 +851,37 @@ local function CreatePopup()
     end)
 
     table.insert(UISpecialFrames, "AccountRepairedPopup")
+
+    --------------------------------------------------
+    -- Guild repair checkbox (top-left)
+    --------------------------------------------------
+    local guildCB = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+    guildCB:SetSize(24, 24)
+    guildCB:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
+    guildCB:SetChecked(AccountRepairedPopupDB.includeGuild ~= false)
+
+    local guildCBLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    guildCBLabel:SetPoint("LEFT", guildCB, "RIGHT", 2, 0)
+    guildCBLabel:SetText(L["INCLUDE_GUILD_REPAIRS"] or "Guild Repairs")
+    guildCBLabel:SetTextColor(0.8, 0.8, 0.8)
+
+    guildCB:SetScript("OnClick", function(self)
+        local checked = self:GetChecked()
+        AccountRepairedPopupDB.includeGuild = checked and true or false
+        PlaySound(checked and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON
+                            or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF)
+        if f.UpdateDisplay then f:UpdateDisplay() end
+    end)
+
+    guildCB:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:AddLine(L["INCLUDE_GUILD_REPAIRS"] or "Guild Repairs", 1, 1, 1)
+        GameTooltip:AddLine(L["GUILD_REPAIRS_TIP"] or "Include repairs paid by the guild bank.", 0.8, 0.8, 0.8, true)
+        GameTooltip:Show()
+    end)
+    guildCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    f.guildCB = guildCB
 
     --------------------------------------------------
     -- Period tab bar (anchored below title)
