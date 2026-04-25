@@ -13,7 +13,7 @@ Features:
 * Filter by Today / Week / Month / All Time
 * Press Escape to close window
 * Character strip showing your current character's repair costs across all time periods
-* If [Account Played](https://www.curseforge.com/wow/addons/accountplayed) is installed, a button will appear to quickly switch to the played time window
+* If [Account Played](https://www.curseforge.com/wow/addons/account-played) is installed, a button will appear to quickly switch to the played time window
 
 Usage:
 ```
