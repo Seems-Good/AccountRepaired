@@ -8,6 +8,7 @@
 ## X-License: Licensed under the MIT License.
 ## X-Website: https://github.com/Seems-Good/AccountRepaired
 ## X-Curse-Project-ID: 1517434
+## X-Wago-ID: 96ELRYNg
 
 Libs\LibStub.lua
 Libs\CallbackHandler-1.0.lua
