@@ -36,6 +36,23 @@ if AccountRepairedPopupDB.includeGuild == nil then
 end
 
 --------------------------------------------------
+-- Layout DB helper
+-- If AccountPlayed is installed we piggyback on its
+-- popup layout table so both windows share position
+-- and size seamlessly.  Falls back to our own DB
+-- safely when AccountPlayed is absent.
+--------------------------------------------------
+local function GetLayoutDB()
+    -- AccountPlayedPopupDB is AccountPlayed's savedvariable for window layout.
+    -- We only use it if the addon is actually loaded (its global table exists)
+    -- AND its layout DB has been initialised (not just nil from a missing var).
+    if AccountPlayed and type(AccountPlayedPopupDB) == "table" then
+        return AccountPlayedPopupDB
+    end
+    return AccountRepairedPopupDB
+end
+
+--------------------------------------------------
 -- Constants
 --------------------------------------------------
 
@@ -52,10 +69,10 @@ local PERIOD_ORDER = { "day", "week", "month", "all" }
 
 -- Armor type visual colours (mirrors RAID_CLASS_COLORS style)
 local ARMOR_COLORS = {
-    Cloth   = { r = 0.75, g = 0.40, b = 1.00 },
+    Cloth   = { r = 0.78, g = 0.78, b = 0.85 },
     Leather = { r = 0.85, g = 0.60, b = 0.20 },
     Mail    = { r = 0.35, g = 0.65, b = 0.95 },
-    Plate   = { r = 0.78, g = 0.78, b = 0.85 },
+    Plate   = { r = 0.75, g = 0.40, b = 1.00 },
     Unknown = { r = 0.65, g = 0.65, b = 0.65 },
 }
 local ARMOR_TYPE_NAMES = { "Cloth", "Leather", "Mail", "Plate", "Unknown" }
@@ -621,11 +638,23 @@ local function CreateBarRow(parent, width, height)
     row.bar.bg:SetAllPoints()
     row.bar.bg:SetColorTexture(0, 0, 0, 0.4)
 
-    -- Value text (right of bar)
+    -- Value text (right of bar): fixed-width percentage column + gold value
     row.valueText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     row.valueText:SetPoint("LEFT", row.bar, "RIGHT", 8, 0)
     row.valueText:SetWidth(160)
     row.valueText:SetJustifyH("LEFT")
+
+    -- Dedicated right-aligned percentage label for consistent column alignment
+    row.pctText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    row.pctText:SetPoint("LEFT", row.bar, "RIGHT", 8, 0)
+    row.pctText:SetWidth(52)
+    row.pctText:SetJustifyH("RIGHT")
+
+    -- Gold value label, anchored after the fixed-width pct column
+    row.goldText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    row.goldText:SetPoint("LEFT", row.pctText, "RIGHT", 6, 0)
+    row.goldText:SetWidth(102)
+    row.goldText:SetJustifyH("LEFT")
 
     row:SetScript("OnEnter", function(self)
         self.highlight:Show()
@@ -776,17 +805,18 @@ end
 local function CreatePopup()
     if AR.popupFrame then return AR.popupFrame end
 
-    local START_W = AccountRepairedPopupDB.width  or 540
-    local START_H = AccountRepairedPopupDB.height or 340
+    local layoutDB    = GetLayoutDB()
+    local START_W = layoutDB.width  or 540
+    local START_H = layoutDB.height or 340
     local MIN_W, MIN_H = 440, 240
     local MAX_W, MAX_H = 740, 480
 
     local f = CreateFrame("Frame", "AccountRepairedPopup", UIParent, "BackdropTemplate")
     f:SetSize(START_W, START_H)
 
-    if AccountRepairedPopupDB.point then
-        f:SetPoint(AccountRepairedPopupDB.point, UIParent, AccountRepairedPopupDB.point,
-                   AccountRepairedPopupDB.x or 0, AccountRepairedPopupDB.y or 0)
+    if layoutDB.point then
+        f:SetPoint(layoutDB.point, UIParent, layoutDB.point,
+                   layoutDB.x or 0, layoutDB.y or 0)
     else
         f:SetPoint("CENTER")
     end
@@ -800,6 +830,7 @@ local function CreatePopup()
     f:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, _, x, y = self:GetPoint()
+        -- Always write our own position – never touch AccountPlayed's DB
         AccountRepairedPopupDB.point = point
         AccountRepairedPopupDB.x     = x
         AccountRepairedPopupDB.y     = y
@@ -946,10 +977,10 @@ local function CreatePopup()
         self:SetVerticalScroll(new)
     end)
 
-    -- Account total line (bottom-left)
+    -- Account total line (bottom-left) – white text
     f.totalRow = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     f.totalRow:SetPoint("BOTTOMLEFT", 15, 18)
-    f.totalRow:SetTextColor(1, 0.82, 0)
+    f.totalRow:SetTextColor(1, 1, 1)
 
     --------------------------------------------------
     -- "Account Played" companion button (bottom-center)
@@ -1016,6 +1047,7 @@ local function CreatePopup()
         if w > MAX_W then self:SetWidth(MAX_W)  end
         if h > MAX_H then self:SetHeight(MAX_H) end
 
+        -- Always write our own size – never touch AccountPlayed's DB
         AccountRepairedPopupDB.width  = self:GetWidth()
         AccountRepairedPopupDB.height = self:GetHeight()
 
@@ -1075,7 +1107,8 @@ local function CreatePopup()
         if accountTotal == 0 then
             AR.popupRows[1].labelText:SetText(L["NO_DATA"])
             AR.popupRows[1].bar:SetValue(0)
-            AR.popupRows[1].valueText:SetText("")
+            AR.popupRows[1].pctText:SetText("")
+            AR.popupRows[1].goldText:SetText("")
             AR.popupRows[1].armorType = nil
             AR.popupRows[1]:Show()
             for i = 2, #AR.popupRows do AR.popupRows[i]:Hide() end
@@ -1105,7 +1138,7 @@ local function CreatePopup()
         for i, row in ipairs(AR.popupRows) do
             local entry = sorted[i]
             if entry then
-                local pct   = entry.gold / accountTotal
+                local pct    = entry.gold / accountTotal
                 local barPct = entry.gold / topGold
                 local color  = ARMOR_COLORS[entry.armorType] or ARMOR_COLORS.Unknown
                 local armorLabel = L["ARMOR_" .. entry.armorType] or entry.armorType
@@ -1115,7 +1148,10 @@ local function CreatePopup()
                 row.labelText:SetTextColor(color.r, color.g, color.b)
                 row.bar:SetValue(barPct)
                 row.bar:SetStatusBarColor(color.r, color.g, color.b)
-                row.valueText:SetText(string.format("%5.1f%% - %s", pct * 100, FormatGoldShort(entry.gold)))
+                -- Right-aligned percentage in its own fixed-width column
+                row.pctText:SetText(string.format("%.1f%%", pct * 100))
+                -- Gold value in the adjacent column
+                row.goldText:SetText("- " .. FormatGoldShort(entry.gold))
                 row:Show()
             else
                 row.armorType = nil
@@ -1140,6 +1176,27 @@ end
 
 local function UpdatePopup()
     local f = CreatePopup()
+
+    -- Re-read layout every time we open so changes made in AccountPlayed
+    -- (size, position) are picked up without a reload.
+    -- Position: prefer AP's DB if available, else our own saved position.
+    -- Size:     same priority.
+    -- We never write back to AP's DB; our own drag/resize handlers always
+    -- save to AccountRepairedPopupDB so AR has its own fallback.
+    local layoutDB = GetLayoutDB()
+
+    local w = layoutDB.width  or AccountRepairedPopupDB.width  or 540
+    local h = layoutDB.height or AccountRepairedPopupDB.height or 340
+    f:SetSize(w, h)
+
+    f:ClearAllPoints()
+    local pt = layoutDB.point or AccountRepairedPopupDB.point
+    if pt then
+        f:SetPoint(pt, UIParent, pt, layoutDB.x or 0, layoutDB.y or 0)
+    else
+        f:SetPoint("CENTER")
+    end
+
     f:UpdateDisplay()
     f:Show()
 end
