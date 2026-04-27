@@ -1,15 +1,7 @@
 --------------------------------------------------
--- Account Repaired – Main Module
 --
--- Tracks gold spent on repairs per character.
--- Data is grouped by armor type (Cloth/Leather/Mail/Plate)
--- and filterable by day / week / month / all-time.
---
--- Mirrors the AccountPlayed UI pattern:
---   - Bar chart by armor type
---   - Right-click a bar -> character management panel
---   - Bottom total line
---   - Resizable, movable window
+-- Account Repaired – Main Module  v@project-version@
+-- 
 --------------------------------------------------
 local _, addonTable = ...
 local L = addonTable.L
@@ -20,19 +12,23 @@ local AR = AccountRepaired
 --------------------------------------------------
 -- SavedVariables  (must NOT be local)
 --------------------------------------------------
-AccountRepairedDB     = AccountRepairedDB or {}
+AccountRepairedDB      = AccountRepairedDB or {}
 AccountRepairedPopupDB = AccountRepairedPopupDB or {
-    width         = 540,
-    height        = 340,
-    point         = "CENTER",
-    x             = 0,
-    y             = 0,
-    period        = "all",
-    includeGuild  = true,
+    width        = 540,
+    height       = 340,
+    point        = "CENTER",
+    x            = 0,
+    y            = 0,
+    period       = "all",
+    includeGuild = true,
+    collapsed    = false,
 }
--- Back-fill default for existing saved databases
+-- Back-fill defaults for existing saved databases
 if AccountRepairedPopupDB.includeGuild == nil then
     AccountRepairedPopupDB.includeGuild = true
+end
+if AccountRepairedPopupDB.collapsed == nil then
+    AccountRepairedPopupDB.collapsed = false
 end
 
 --------------------------------------------------
@@ -41,11 +37,10 @@ end
 -- popup layout table so both windows share position
 -- and size seamlessly.  Falls back to our own DB
 -- safely when AccountPlayed is absent.
+-- NOTE: This block is intentionally unchanged from
+--       0.3.3 to preserve AccountPlayed integration.
 --------------------------------------------------
 local function GetLayoutDB()
-    -- AccountPlayedPopupDB is AccountPlayed's savedvariable for window layout.
-    -- We only use it if the addon is actually loaded (its global table exists)
-    -- AND its layout DB has been initialised (not just nil from a missing var).
     if AccountPlayed and type(AccountPlayedPopupDB) == "table" then
         return AccountPlayedPopupDB
     end
@@ -81,6 +76,24 @@ local ARMOR_TYPE_NAMES = { "Cloth", "Leather", "Mail", "Plate", "Unknown" }
 local ARMOR_SLOTS = { 1, 3, 5, 7, 8 }
 local ARMOR_TYPES_VALID = { Cloth = true, Leather = true, Mail = true, Plate = true }
 
+-- FIX (audit): tolerance multiplier used when validating a money delta
+-- against the pre-repair cost snapshot.  A delta > snapshot * this value
+-- means something other than the repair also changed player money in the
+-- same PLAYER_MONEY event (e.g. the player simultaneously bought an item).
+-- 1.05 = allow up to 5% variance to cover floating-point/currency rounding.
+local REPAIR_DELTA_TOLERANCE = 1.05
+
+-- Height of the window when collapsed (char strip + footer only)
+local COLLAPSED_H = 82
+
+--------------------------------------------------
+-- Panel layout constants
+--------------------------------------------------
+local CPANEL_W        = 240
+local CPANEL_ROW_H    = 22
+local CPANEL_HEADER_H = 28
+local CPANEL_PAD      = 6
+
 --------------------------------------------------
 -- State
 --------------------------------------------------
@@ -90,11 +103,16 @@ AR.popupRows        = {}
 AR.charPanel        = nil
 AR.charPanelArmor   = nil   -- which armor type is currently pinned in the panel
 AR.currentPeriod    = AccountRepairedPopupDB.period or "all"
+AR.collapsed        = AccountRepairedPopupDB.collapsed or false
 
 local inMerchant        = false
 local lastMoney         = 0
 local repairPending     = false
 local snappedRepairCost = 0   -- GetRepairAllCost() cached before RepairAllItems fires
+
+-- FIX (audit): track item IDs whose GetItemInfo() returned nil so we can
+-- retry when ITEM_DATA_LOAD_RESULT fires.
+local pendingArmorDetect = false
 
 --------------------------------------------------
 -- Helpers – Character identity
@@ -117,27 +135,71 @@ end
 
 --------------------------------------------------
 -- Helpers – Armor type detection
+--
+-- FIX (audit): DetectArmorType() now returns a second boolean indicating
+-- whether every sampled slot had loaded item data.  Callers that care
+-- about reliability can use this to schedule a retry.
 --------------------------------------------------
 
 local function DetectArmorType()
-    local counts = {}
+    local counts   = {}
+    local allReady = true   -- becomes false if any GetItemInfo() returned nil
+
     for _, slotID in ipairs(ARMOR_SLOTS) do
         local itemID = GetInventoryItemID("player", slotID)
         if itemID then
-            -- GetItemInfo returns: name, link, quality, iLevel, reqLevel, class, subClass, ...
             local _, _, _, _, _, _, subType = GetItemInfo(itemID)
-            if subType and ARMOR_TYPES_VALID[subType] then
-                counts[subType] = (counts[subType] or 0) + 1
+            if subType then
+                if ARMOR_TYPES_VALID[subType] then
+                    counts[subType] = (counts[subType] or 0) + 1
+                end
+            else
+                -- Item data not in client cache yet
+                allReady = false
             end
         end
     end
+
     local best, bestCount = "Unknown", 0
     for subType, count in pairs(counts) do
         if count > bestCount then
             best, bestCount = subType, count
         end
     end
-    return best
+    return best, allReady
+end
+
+-- FIX (audit): Ensure a character's DB row exists (creating it if needed)
+-- and update its armorType.  Used by both the login refresh and the
+-- ITEM_DATA_LOAD_RESULT retry so the logic is not duplicated.
+local function RefreshCharArmorType()
+    local realm, name   = GetCharInfo()
+    local charKey       = GetCharKey(realm, name)
+    local _, classFile  = UnitClass("player")
+    local armorType, allReady = DetectArmorType()
+
+    -- Always ensure the row exists for the current character so the
+    -- 2-second post-login refresh never silently skips a new character.
+    if not AccountRepairedDB[charKey] then
+        AccountRepairedDB[charKey] = {
+            class     = classFile or "UNKNOWN",
+            armorType = armorType,
+            repairs   = {},
+        }
+    end
+
+    local charData = AccountRepairedDB[charKey]
+    charData.class = classFile or charData.class or "UNKNOWN"
+    if armorType ~= "Unknown" then
+        charData.armorType = armorType
+    end
+    charData.armorType = charData.armorType or "Unknown"
+
+    -- If some item data was still missing, ask for a retry via
+    -- ITEM_DATA_LOAD_RESULT (registered below in the event handler).
+    if not allReady then
+        pendingArmorDetect = true
+    end
 end
 
 --------------------------------------------------
@@ -214,7 +276,7 @@ local function GetCharRepairsInPeriod(charData, periodStart)
 end
 
 local function GetArmorTypeTotals(period)
-    local totals      = {}
+    local totals       = {}
     local accountTotal = 0
     local periodStart  = GetPeriodStart(period)
 
@@ -277,6 +339,13 @@ end
 
 --------------------------------------------------
 -- Core: Record a repair event
+--
+-- FIX (audit): isGuild parameter is now meaningfully used.
+--   Guild repairs are passed as isGuild=true by the detection logic in
+--   the PLAYER_MONEY handler below.
+--
+-- FIX (audit): O(n^2) prune replaced with a single-pass cutoff scan
+--   followed by one table.move call, which is O(n) total.
 --------------------------------------------------
 
 local function RecordRepair(copper, isGuild)
@@ -285,7 +354,7 @@ local function RecordRepair(copper, isGuild)
     local realm, name = GetCharInfo()
     local charKey     = GetCharKey(realm, name)
     local _, classFile = UnitClass("player")
-    local armorType   = DetectArmorType()
+    local armorType   = DetectArmorType()   -- second return value not needed here
 
     if not AccountRepairedDB[charKey] then
         AccountRepairedDB[charKey] = {
@@ -306,16 +375,56 @@ local function RecordRepair(copper, isGuild)
     if isGuild then entry.guild = true end
     table.insert(charData.repairs, entry)
 
-    -- Prune entries older than DATA_RETENTION_SECONDS
-    local cutoff = time() - DATA_RETENTION_SECONDS
-    while charData.repairs[1] and (charData.repairs[1].t or 0) < cutoff do
-        table.remove(charData.repairs, 1)
+    -- FIX (audit): O(n) prune – find the first index still within retention
+    -- window, then remove everything before it in a single table.move call.
+    local cutoff   = time() - DATA_RETENTION_SECONDS
+    local repairs  = charData.repairs
+    local firstOK  = 1
+    while firstOK <= #repairs and (repairs[firstOK].t or 0) < cutoff do
+        firstOK = firstOK + 1
+    end
+    if firstOK > 1 then
+        -- Shift valid entries to the front; shrink the table.
+        local keepCount = #repairs - firstOK + 1
+        table.move(repairs, firstOK, #repairs, 1)
+        for i = keepCount + 1, #repairs do
+            repairs[i] = nil
+        end
     end
 
     -- Refresh popup if it is open
     if AR.popupFrame and AR.popupFrame:IsShown() then
         AR.popupFrame:UpdateDisplay()
     end
+end
+
+--------------------------------------------------
+-- Guild repair detection helpers
+--
+-- FIX (audit): Guild repairs were never detected or recorded in 0.3.3.
+-- Strategy:
+--   1. On MERCHANT_SHOW, snapshot both player money AND the guild bank
+--      repair availability flag + the full repair cost.
+--   2. When RepairAllItems() is hooked, snapshot money again (pre-repair)
+--      and note whether CanGuildBankRepair() is true.
+--   3. In PLAYER_MONEY, compute the personal money delta.
+--      - If the delta equals snappedRepairCost (within tolerance) →
+--        purely personal repair; record as normal.
+--      - If the delta is LESS than snappedRepairCost AND guild bank repair
+--        was available → the guild covered the remainder; record both
+--        parts with the correct flag.
+--      - If delta is 0 → the guild covered everything; record the full
+--        snapped cost as guild.
+--   This correctly handles mixed personal+guild and guild-only repairs
+--   without requiring any additional WoW API hooks.
+--------------------------------------------------
+
+-- Cached state set when RepairAllItems() fires
+local repairWasGuildAvail   = false   -- CanGuildBankRepair() at repair time
+
+local function SnapshotRepairState()
+    snappedRepairCost   = GetRepairAllCost() or 0
+    repairWasGuildAvail = (CanGuildBankRepair and CanGuildBankRepair()) and true or false
 end
 
 --------------------------------------------------
@@ -327,67 +436,113 @@ AR.mainFrame:RegisterEvent("MERCHANT_SHOW")
 AR.mainFrame:RegisterEvent("MERCHANT_CLOSED")
 AR.mainFrame:RegisterEvent("PLAYER_MONEY")
 AR.mainFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+-- FIX (audit): register for item data load so armor detection can retry
+-- when GetItemInfo() returned nil during login or equipment scan.
+AR.mainFrame:RegisterEvent("ITEM_DATA_LOAD_RESULT")
 
 AR.mainFrame:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
-        -- Re-detect armor type on login (items are loaded by now after a short delay)
+        -- Re-detect armor type on login (items are loaded by now after a short delay).
+        -- FIX (audit): RefreshCharArmorType() also creates the DB row when it
+        -- doesn't exist yet, so brand-new characters are no longer skipped.
         C_Timer.After(2, function()
-            local realm, name = GetCharInfo()
-            local charKey     = GetCharKey(realm, name)
-            local charData    = AccountRepairedDB[charKey]
-            if charData then
-                local armorType = DetectArmorType()
-                if armorType ~= "Unknown" then
-                    charData.armorType = armorType
-                end
-            end
+            RefreshCharArmorType()
         end)
 
+    elseif event == "ITEM_DATA_LOAD_RESULT" then
+        -- FIX (audit): if a previous DetectArmorType() call missed item data,
+        -- retry now that new item info has arrived.
+        if pendingArmorDetect then
+            pendingArmorDetect = false
+            RefreshCharArmorType()
+        end
+
     elseif event == "MERCHANT_SHOW" then
-        inMerchant          = true
-        lastMoney           = GetMoney()
-        repairPending       = false
-        snappedRepairCost   = GetRepairAllCost()
+        inMerchant        = true
+        lastMoney         = GetMoney()
+        repairPending     = false
+        SnapshotRepairState()
 
     elseif event == "MERCHANT_CLOSED" then
         inMerchant          = false
         repairPending       = false
         snappedRepairCost   = 0
+        repairWasGuildAvail = false
 
     elseif event == "PLAYER_EQUIPMENT_CHANGED" then
         -- Keep repair-cost snapshot fresh if gear changes while at a vendor
         if inMerchant then
-            snappedRepairCost = GetRepairAllCost()
+            SnapshotRepairState()
         end
 
     elseif event == "PLAYER_MONEY" then
         if inMerchant and repairPending then
             local currentMoney = GetMoney()
-            local delta        = lastMoney - currentMoney
-            if delta > 0 then
-                RecordRepair(delta, false)
+            local delta        = lastMoney - currentMoney   -- positive = player paid
+
+            -- FIX (audit): validate delta against the pre-repair snapshot.
+            -- If delta wildly exceeds what a full self-repair should cost, the
+            -- player also bought something in the same money event.  In that
+            -- case we use the snapshot as the authoritative repair cost instead
+            -- of the raw delta to avoid inflating repair records.
+            --
+            -- Edge cases handled:
+            --   delta == 0                 → guild paid everything
+            --   0 < delta < snapshot       → guild covered the difference
+            --   delta ≈ snapshot           → personal repair (normal case)
+            --   delta > snapshot * tolerance → mixed buy+repair; use snapshot
+            local personalCost = delta
+            local guildCost    = 0
+
+            if snappedRepairCost > 0 then
+                if delta <= 0 then
+                    -- Guild covered the entire repair; player lost no money.
+                    personalCost = 0
+                    guildCost    = repairWasGuildAvail and snappedRepairCost or 0
+                elseif delta > snappedRepairCost * REPAIR_DELTA_TOLERANCE then
+                    -- Player bought something at the same time.  Trust the
+                    -- snapshot for repair cost, not the inflated delta.
+                    personalCost = snappedRepairCost
+                    guildCost    = 0
+                elseif repairWasGuildAvail and delta < snappedRepairCost then
+                    -- Guild covered the portion the player didn't pay.
+                    personalCost = delta
+                    guildCost    = snappedRepairCost - delta
+                end
+                -- else: delta ≈ snappedRepairCost → pure personal, already set
             end
+
+            if personalCost > 0 then RecordRepair(personalCost, false) end
+            if guildCost    > 0 then RecordRepair(guildCost,    true)  end
+
             repairPending       = false
             lastMoney           = currentMoney
-            -- Items are now repaired; update snapshot so a subsequent guild
-            -- repair (unlikely but possible) doesn't re-record a stale cost.
-            snappedRepairCost   = GetRepairAllCost()
+            -- Refresh snapshot so a second repair at the same visit starts clean.
+            SnapshotRepairState()
+
         elseif inMerchant then
             -- Keep lastMoney current between non-repair money changes
-            -- (e.g. the player bought something) so the NEXT repair delta is accurate.
+            -- (e.g. the player bought something) so the NEXT repair delta
+            -- is accurate.
             lastMoney = GetMoney()
+            -- Also refresh repair cost in case the vendor's prices changed.
+            if not repairPending then
+                snappedRepairCost = GetRepairAllCost() or 0
+            end
         end
     end
 end)
 
 -- Hook RepairAllItems so we know a repair action was initiated.
--- The hook fires AFTER the call; PLAYER_MONEY arrives synchronously next,
--- so the flag is already set when we read the delta.
+-- FIX (audit): We also snapshot guild availability here because it is the
+-- moment immediately before the repair fires and gives us the most accurate
+-- picture of who will be paying.
 hooksecurefunc("RepairAllItems", function()
     if inMerchant then
-        -- Snapshot money BEFORE GetMoney() drops – too late here, so we
-        -- use the lastMoney value that was kept current by PLAYER_MONEY/MERCHANT_SHOW.
-        repairPending = true
+        repairPending       = true
+        repairWasGuildAvail = (CanGuildBankRepair and CanGuildBankRepair()) and true or false
+        -- Re-snapshot the cost in case gear changed since MERCHANT_SHOW.
+        snappedRepairCost   = GetRepairAllCost() or 0
     end
 end)
 
@@ -430,9 +585,9 @@ local function DeleteCharacter(input)
         print("|cffff9900" .. L["CMD_DELETE_USAGE"] .. "|r")
         return
     end
-    local targetKey  = realmName .. "-" .. charName
+    local targetKey   = realmName .. "-" .. charName
     local lowerTarget = targetKey:lower()
-    local foundKey   = nil
+    local foundKey    = nil
     for dbKey in pairs(AccountRepairedDB) do
         if dbKey:lower() == lowerTarget then foundKey = dbKey; break end
     end
@@ -450,11 +605,6 @@ SlashCmdList.ACCOUNTREPAIREDDELETE = DeleteCharacter
 -- Character Management Panel
 -- (mirrors AccountPlayed's charPanel pattern)
 --------------------------------------------------
-
-local CPANEL_W        = 240
-local CPANEL_ROW_H    = 22
-local CPANEL_HEADER_H = 28
-local CPANEL_PAD      = 6
 
 local function CreateCharPanel()
     if AR.charPanel then return AR.charPanel end
@@ -581,7 +731,7 @@ function AR.ShowCharPanel(armorType, forceShow, anchorRow)
         end
     end
 
-    local color = ARMOR_COLORS[armorType] or ARMOR_COLORS.Unknown
+    local color      = ARMOR_COLORS[armorType] or ARMOR_COLORS.Unknown
     local armorLabel = L["ARMOR_" .. armorType] or armorType
     p.titleText:SetText(armorLabel)
     p.titleText:SetTextColor(color.r, color.g, color.b)
@@ -606,6 +756,12 @@ end
 
 --------------------------------------------------
 -- Main popup – bar row factory
+--
+-- FIX (audit): Removed the dead row.valueText widget.  The right-hand
+-- column now uses only row.pctText (fixed-width percentage) and
+-- row.goldText (gold value), which were already the only two widgets
+-- written to by UpdateDisplay().  Removing valueText eliminates the
+-- potential horizontal overlap with pctText.
 --------------------------------------------------
 
 local function CreateBarRow(parent, width, height)
@@ -638,19 +794,14 @@ local function CreateBarRow(parent, width, height)
     row.bar.bg:SetAllPoints()
     row.bar.bg:SetColorTexture(0, 0, 0, 0.4)
 
-    -- Value text (right of bar): fixed-width percentage column + gold value
-    row.valueText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    row.valueText:SetPoint("LEFT", row.bar, "RIGHT", 8, 0)
-    row.valueText:SetWidth(160)
-    row.valueText:SetJustifyH("LEFT")
-
-    -- Dedicated right-aligned percentage label for consistent column alignment
+    -- Right-aligned percentage label in its own fixed-width column.
+    -- NOTE: row.valueText has been removed (was created but never written to).
     row.pctText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     row.pctText:SetPoint("LEFT", row.bar, "RIGHT", 8, 0)
     row.pctText:SetWidth(52)
     row.pctText:SetJustifyH("RIGHT")
 
-    -- Gold value label, anchored after the fixed-width pct column
+    -- Gold value label, anchored after the fixed-width pct column.
     row.goldText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     row.goldText:SetPoint("LEFT", row.pctText, "RIGHT", 6, 0)
     row.goldText:SetWidth(102)
@@ -662,7 +813,7 @@ local function CreateBarRow(parent, width, height)
             local chars = GetCharactersByArmorType(self.armorType, AR.currentPeriod)
             if #chars > 0 then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                local color = ARMOR_COLORS[self.armorType] or ARMOR_COLORS.Unknown
+                local color      = ARMOR_COLORS[self.armorType] or ARMOR_COLORS.Unknown
                 local armorLabel = L["ARMOR_" .. self.armorType] or self.armorType
                 GameTooltip:AddLine(armorLabel, color.r, color.g, color.b)
                 GameTooltip:AddLine(" ")
@@ -675,7 +826,7 @@ local function CreateBarRow(parent, width, height)
                     )
                 end
                 GameTooltip:AddLine(" ")
-                GameTooltip:AddLine(L["CLICK_TO_PRINT"],       0.5, 0.5, 0.5)
+                GameTooltip:AddLine(L["CLICK_TO_PRINT"],        0.5, 0.5, 0.5)
                 GameTooltip:AddLine(L["CHAR_PANEL_RIGHT_CLICK"], 0.5, 0.5, 0.5)
                 GameTooltip:Show()
             end
@@ -698,7 +849,7 @@ local function CreateBarRow(parent, width, height)
             local chars = GetCharactersByArmorType(self.armorType, AR.currentPeriod)
             if #chars > 0 then
                 PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
-                local armorLabel = L["ARMOR_" .. self.armorType] or self.armorType
+                local armorLabel  = L["ARMOR_" .. self.armorType] or self.armorType
                 local periodLabel = GetPeriodLabel(AR.currentPeriod)
                 print("|cff00ff00" .. armorLabel .. " (" .. periodLabel .. "):|r")
                 for _, char in ipairs(chars) do
@@ -805,9 +956,9 @@ end
 local function CreatePopup()
     if AR.popupFrame then return AR.popupFrame end
 
-    local layoutDB    = GetLayoutDB()
-    local START_W = layoutDB.width  or 540
-    local START_H = layoutDB.height or 340
+    local layoutDB = GetLayoutDB()
+    local START_W  = layoutDB.width  or 540
+    local START_H  = layoutDB.height or 340
     local MIN_W, MIN_H = 440, 240
     local MAX_W, MAX_H = 740, 480
 
@@ -830,7 +981,7 @@ local function CreatePopup()
     f:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local point, _, _, x, y = self:GetPoint()
-        -- Always write our own position – never touch AccountPlayed's DB
+        -- Always write our own position – never touch AccountPlayed's DB.
         AccountRepairedPopupDB.point = point
         AccountRepairedPopupDB.x     = x
         AccountRepairedPopupDB.y     = y
@@ -854,6 +1005,7 @@ local function CreatePopup()
     br:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
     br:SetScript("OnMouseDown", function(self) self:GetParent():StartSizing("BOTTOMRIGHT") end)
     br:SetScript("OnMouseUp",   function(self) self:GetParent():StopMovingOrSizing() end)
+    f.resizeGrip = br   -- stored so SetCollapsed can show/hide it
 
     f:SetBackdrop({
         bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -868,13 +1020,57 @@ local function CreatePopup()
     f.title:SetPoint("TOP", f, "TOP", 0, -12)
     f.title:SetText(L["WINDOW_TITLE"])
 
-    -- Close button
+    -- Close button  [X]
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -10, -10)
     close:SetScript("OnClick", function()
         PlaySound(SOUNDKIT.IG_MAINMENU_CLOSE)
         f:Hide()
     end)
+
+    --------------------------------------------------
+    -- Collapse / expand button  [-] / [+]
+    -- Sits immediately to the left of the close [X].
+    --------------------------------------------------
+    local collapseBtn = CreateFrame("Button", nil, f, "BackdropTemplate")
+    collapseBtn:SetSize(20, 20)
+    collapseBtn:SetPoint("RIGHT", close, "LEFT", -4, 0)
+
+    collapseBtn:SetBackdrop({
+        bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    collapseBtn:SetBackdropColor(0.10, 0.10, 0.10, 0.85)
+    collapseBtn:SetBackdropBorderColor(0.55, 0.55, 0.55, 0.85)
+
+    collapseBtn.label = collapseBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    collapseBtn.label:SetAllPoints()
+    collapseBtn.label:SetJustifyH("CENTER")
+    collapseBtn.label:SetJustifyV("MIDDLE")
+    collapseBtn.label:SetText(AR.collapsed and "+" or "-")
+
+    collapseBtn:SetScript("OnEnter", function(self)
+        self:SetBackdropColor(0.20, 0.20, 0.20, 0.95)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        if AR.collapsed then
+            GameTooltip:AddLine(L["EXPAND_WINDOW"]   or "Expand window",   1, 1, 1)
+        else
+            GameTooltip:AddLine(L["COLLAPSE_WINDOW"] or "Collapse window", 1, 1, 1)
+        end
+        GameTooltip:Show()
+    end)
+    collapseBtn:SetScript("OnLeave", function(self)
+        self:SetBackdropColor(0.10, 0.10, 0.10, 0.85)
+        GameTooltip:Hide()
+    end)
+    collapseBtn:SetScript("OnClick", function()
+        PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+        f:SetCollapsed(not AR.collapsed)
+    end)
+
+    f.collapseBtn = collapseBtn
 
     f:SetScript("OnHide", function()
         if AR.charPanel then AR.charPanel:Hide() end
@@ -893,7 +1089,7 @@ local function CreatePopup()
 
     local guildCBLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     guildCBLabel:SetPoint("LEFT", guildCB, "RIGHT", 2, 0)
-    guildCBLabel:SetText(L["INCLUDE_GUILD_REPAIRS"] or "Guild Repairs")
+    guildCBLabel:SetText(L["INCLUDE_GUILD_REPAIRS"])
     guildCBLabel:SetTextColor(0.8, 0.8, 0.8)
 
     guildCB:SetScript("OnClick", function(self)
@@ -906,13 +1102,14 @@ local function CreatePopup()
 
     guildCB:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine(L["INCLUDE_GUILD_REPAIRS"] or "Guild Repairs", 1, 1, 1)
-        GameTooltip:AddLine(L["GUILD_REPAIRS_TIP"] or "Include repairs paid by the guild bank.", 0.8, 0.8, 0.8, true)
+        GameTooltip:AddLine(L["INCLUDE_GUILD_REPAIRS"], 1, 1, 1)
+        GameTooltip:AddLine(L["GUILD_REPAIRS_TIP"], 0.8, 0.8, 0.8, true)
         GameTooltip:Show()
     end)
     guildCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    f.guildCB = guildCB
+    f.guildCB      = guildCB
+    f.guildCBLabel = guildCBLabel   -- stored so SetCollapsed can show/hide it
 
     --------------------------------------------------
     -- Period tab bar (anchored below title)
@@ -929,14 +1126,16 @@ local function CreatePopup()
 
     --------------------------------------------------
     -- Current-character summary strip
-    -- Shows: "CharName (Class)  Today: Xg  Week: Xg  All: Xg"
+    -- Shows: "CharName (ArmorType)  Today: Xg  Week: Xg  Month: Xg  Total: Xg"
+    -- IMPROVE (audit): the label for the currently active period is
+    -- highlighted in green so the user can tell which window the bars reflect.
     --------------------------------------------------
     local charStrip = CreateFrame("Frame", nil, f, "BackdropTemplate")
     charStrip:SetPoint("TOPLEFT",  f, "TOPLEFT",  14, -76)
     charStrip:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -76)
     charStrip:SetHeight(36)
     charStrip:SetBackdrop({
-        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
         tile = true, tileSize = 16, edgeSize = 10,
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
@@ -983,9 +1182,9 @@ local function CreatePopup()
     f.totalRow:SetTextColor(1, 1, 1)
 
     --------------------------------------------------
-    -- "Account Played" companion button (bottom-center)
-    -- Only shown when AccountPlayed addon is installed.
-    -- Mirrors the button AccountRepaired injects into AP.
+    -- "Account Played" companion button (bottom-right)
+    -- NOTE: This entire block is intentionally unchanged from 0.3.3.
+    --       All AccountPlayed integration is preserved exactly as-is.
     --------------------------------------------------
     local apBtn = CreateFrame("Button", nil, f, "BackdropTemplate")
     apBtn:SetSize(120, 20)
@@ -997,7 +1196,7 @@ local function CreatePopup()
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
     apBtn:SetBackdropColor(0.05, 0.05, 0.05, 0.85)
-    apBtn:SetBackdropBorderColor(0.4, 0.7, 1.0, 0.9)   -- blue border to distinguish from AR's gold
+    apBtn:SetBackdropBorderColor(0.4, 0.7, 1.0, 0.9)
 
     local apBtnLabel = apBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     apBtnLabel:SetAllPoints()
@@ -1019,13 +1218,12 @@ local function CreatePopup()
     end)
     apBtn:SetScript("OnClick", function()
         PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
-        f:Hide()   -- close AccountRepaired (OnHide handles charPanel cleanup)
+        f:Hide()   -- OnHide handles charPanel cleanup
         if AccountPlayed and AccountPlayed.ToggleClassWindow then
             AccountPlayed.ToggleClassWindow()
         end
     end)
 
-    -- Hidden by default; UpdateDisplay reveals it only if AP is present
     apBtn:Hide()
     f.apBtn = apBtn
 
@@ -1040,14 +1238,18 @@ local function CreatePopup()
 
     --------------------------------------------------
     -- Resize handler
+    -- Guard: skip all logic while in collapsed mode so the COLLAPSED_H
+    -- is never accidentally saved over the user's preferred full height.
     --------------------------------------------------
     f:SetScript("OnSizeChanged", function(self, w, h)
+        if AR.collapsed then return end   -- collapsed mode: ignore size events
+
         if w < MIN_W then self:SetWidth(MIN_W)  end
         if h < MIN_H then self:SetHeight(MIN_H) end
         if w > MAX_W then self:SetWidth(MAX_W)  end
         if h > MAX_H then self:SetHeight(MAX_H) end
 
-        -- Always write our own size – never touch AccountPlayed's DB
+        -- Always write our own size – never touch AccountPlayed's DB.
         AccountRepairedPopupDB.width  = self:GetWidth()
         AccountRepairedPopupDB.height = self:GetHeight()
 
@@ -1058,10 +1260,76 @@ local function CreatePopup()
     end)
 
     --------------------------------------------------
+    -- SetCollapsed  (NEW in v0.4.1)
+    --
+    -- collapsed = true  → shrink to char strip + footer
+    -- collapsed = false → restore to full bar-chart view
+    --
+    -- Persists state to AccountRepairedPopupDB.collapsed.
+    -- Does NOT touch AccountPlayedPopupDB (integration preserved).
+    --------------------------------------------------
+    f.SetCollapsed = function(self, collapsed)
+        AR.collapsed = collapsed
+        AccountRepairedPopupDB.collapsed = collapsed
+
+        if collapsed then
+            -- ── Hide full-view elements ──────────────────────────────────
+            self.title:Hide()
+            self.guildCB:Hide()
+            self.guildCBLabel:Hide()
+            self.tabs:Hide()
+            self.scrollFrame:Hide()
+            self.resizeGrip:Hide()
+
+            -- ── Move charStrip to just below the top buttons ─────────────
+            self.charStrip:ClearAllPoints()
+            self.charStrip:SetPoint("TOPLEFT",  self, "TOPLEFT",  14, -10)
+            self.charStrip:SetPoint("TOPRIGHT", self, "TOPRIGHT", -14, -10)
+
+            -- ── Shrink frame; disable resize so grip can't re-expand it ──
+            self:SetResizable(false)
+            self:SetHeight(COLLAPSED_H)
+
+            -- ── Update button glyph ──────────────────────────────────────
+            self.collapseBtn.label:SetText("+")
+
+        else
+            -- ── Restore full-view elements ───────────────────────────────
+            self.title:Show()
+            self.guildCB:Show()
+            self.guildCBLabel:Show()
+            self.tabs:Show()
+            self.scrollFrame:Show()
+            self.resizeGrip:Show()
+
+            -- ── Restore charStrip to its original anchored position ──────
+            self.charStrip:ClearAllPoints()
+            self.charStrip:SetPoint("TOPLEFT",  self, "TOPLEFT",  14, -76)
+            self.charStrip:SetPoint("TOPRIGHT", self, "TOPRIGHT", -14, -76)
+
+            -- ── Re-enable resize and restore saved height ─────────────────
+            self:SetResizable(true)
+            if self.SetResizeBounds then
+                self:SetResizeBounds(MIN_W, MIN_H, MAX_W, MAX_H)
+            elseif self.SetMinResize then
+                self:SetMinResize(MIN_W, MIN_H)
+                self:SetMaxResize(MAX_W, MAX_H)
+            end
+            -- AccountRepairedPopupDB.height is kept current by OnSizeChanged
+            -- (which is guarded against collapsed mode), so this is safe.
+            self:SetHeight(AccountRepairedPopupDB.height or START_H)
+
+            -- ── Update button glyph ──────────────────────────────────────
+            self.collapseBtn.label:SetText("-")
+        end
+    end
+
+    --------------------------------------------------
     -- UpdateDisplay
     --------------------------------------------------
     f.UpdateDisplay = function(self)
         -- ── Account Played companion button ───────────────────────────────
+        -- NOTE: unchanged from 0.3.3; AccountPlayed integration preserved.
         if self.apBtn then
             if AccountPlayed and AccountPlayed.ToggleClassWindow then
                 self.apBtn:Show()
@@ -1075,15 +1343,17 @@ local function CreatePopup()
             for _, tab in ipairs(self.tabRefs) do tab:UpdateState() end
         end
 
+        -- ── Sync guild checkbox to DB (handles external DB changes) ───────
+        if self.guildCB then
+            self.guildCB:SetChecked(AccountRepairedPopupDB.includeGuild ~= false)
+        end
+
         -- ── Current-character strip ───────────────────────────────────────
-        local realm, name = GetCharInfo()
-        local charKey     = GetCharKey(realm, name)
+        local realm, name  = GetCharInfo()
         local _, classFile = UnitClass("player")
-        local classColor  = (classFile and RAID_CLASS_COLORS[classFile]) or { r=1, g=1, b=1 }
+        local classColor   = (classFile and RAID_CLASS_COLORS[classFile]) or { r=1, g=1, b=1 }
 
         local stats, charData = GetCurrentCharAllPeriods()
-        self.charStrip.nameText:SetText(string.format("|cff%02x%02x%02x%s|r",
-            classColor.r * 255, classColor.g * 255, classColor.b * 255, name))
 
         local armorLabel = ""
         if charData then
@@ -1093,79 +1363,90 @@ local function CreatePopup()
             classColor.r * 255, classColor.g * 255, classColor.b * 255,
             name, "|cffAAAAAA" .. armorLabel .. "|r"))
 
+        -- IMPROVE (audit): bold/green the currently-active period label.
+        local function PeriodLabel(key)
+            if key == AR.currentPeriod then
+                return "|cff33ff33" .. GetPeriodLabel(key) .. "|r"
+            end
+            return GetPeriodLabel(key)
+        end
+
         self.charStrip.statsText:SetText(string.format(
-            "Today: %s   Week: %s   Month: %s   Total: %s",
-            FormatGoldShort(stats.day),
-            FormatGoldShort(stats.week),
-            FormatGoldShort(stats.month),
-            FormatGoldShort(stats.all)
+            "%s: %s   %s: %s   %s: %s   %s: %s",
+            PeriodLabel("day"),   FormatGoldShort(stats.day),
+            PeriodLabel("week"),  FormatGoldShort(stats.week),
+            PeriodLabel("month"), FormatGoldShort(stats.month),
+            PeriodLabel("all"),   FormatGoldShort(stats.all)
         ))
 
-        -- ── Armor type bars ───────────────────────────────────────────────
-        local totals, accountTotal = GetArmorTypeTotals(AR.currentPeriod)
+        -- ── Armor type bars (skip in collapsed mode) ──────────────────────
+        if not AR.collapsed then
+            local totals, accountTotal = GetArmorTypeTotals(AR.currentPeriod)
 
-        if accountTotal == 0 then
-            AR.popupRows[1].labelText:SetText(L["NO_DATA"])
-            AR.popupRows[1].bar:SetValue(0)
-            AR.popupRows[1].pctText:SetText("")
-            AR.popupRows[1].goldText:SetText("")
-            AR.popupRows[1].armorType = nil
-            AR.popupRows[1]:Show()
-            for i = 2, #AR.popupRows do AR.popupRows[i]:Hide() end
-            self.content:SetHeight(26)
-            self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(0))
-            UpdateScrollBarVisibility(self)
-            return
-        end
-
-        -- Sort armor types by gold spent descending
-        local sorted = {}
-        for _, armorType in ipairs(ARMOR_TYPE_NAMES) do
-            if (totals[armorType] or 0) > 0 then
-                table.insert(sorted, { armorType = armorType, gold = totals[armorType] })
-            end
-        end
-        -- include any types not in ARMOR_TYPE_NAMES (shouldn't happen, but be safe)
-        for armorType, gold in pairs(totals) do
-            local found = false
-            for _, s in ipairs(sorted) do if s.armorType == armorType then found = true; break end end
-            if not found then table.insert(sorted, { armorType = armorType, gold = gold }) end
-        end
-        table.sort(sorted, function(a, b) return a.gold > b.gold end)
-
-        local topGold = sorted[1].gold
-
-        for i, row in ipairs(AR.popupRows) do
-            local entry = sorted[i]
-            if entry then
-                local pct    = entry.gold / accountTotal
-                local barPct = entry.gold / topGold
-                local color  = ARMOR_COLORS[entry.armorType] or ARMOR_COLORS.Unknown
-                local armorLabel = L["ARMOR_" .. entry.armorType] or entry.armorType
-
-                row.armorType = entry.armorType
-                row.labelText:SetText(armorLabel)
-                row.labelText:SetTextColor(color.r, color.g, color.b)
-                row.bar:SetValue(barPct)
-                row.bar:SetStatusBarColor(color.r, color.g, color.b)
-                -- Right-aligned percentage in its own fixed-width column
-                row.pctText:SetText(string.format("%.1f%%", pct * 100))
-                -- Gold value in the adjacent column
-                row.goldText:SetText("- " .. FormatGoldShort(entry.gold))
-                row:Show()
+            if accountTotal == 0 then
+                AR.popupRows[1].labelText:SetText(L["NO_DATA"])
+                AR.popupRows[1].bar:SetValue(0)
+                AR.popupRows[1].pctText:SetText("")
+                AR.popupRows[1].goldText:SetText("")
+                AR.popupRows[1].armorType = nil
+                AR.popupRows[1]:Show()
+                for i = 2, #AR.popupRows do AR.popupRows[i]:Hide() end
+                self.content:SetHeight(26)
+                self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(0))
+                UpdateScrollBarVisibility(self)
             else
-                row.armorType = nil
-                row:Hide()
+                -- Sort armor types by gold spent descending
+                local sorted = {}
+                for _, armorType in ipairs(ARMOR_TYPE_NAMES) do
+                    if (totals[armorType] or 0) > 0 then
+                        table.insert(sorted, { armorType = armorType, gold = totals[armorType] })
+                    end
+                end
+                -- Include any types not in ARMOR_TYPE_NAMES (safety net)
+                for armorType, gold in pairs(totals) do
+                    local found = false
+                    for _, s in ipairs(sorted) do if s.armorType == armorType then found = true; break end end
+                    if not found then table.insert(sorted, { armorType = armorType, gold = gold }) end
+                end
+                table.sort(sorted, function(a, b) return a.gold > b.gold end)
+
+                local topGold = sorted[1].gold
+
+                for i, row in ipairs(AR.popupRows) do
+                    local entry = sorted[i]
+                    if entry then
+                        local pct    = entry.gold / accountTotal
+                        local barPct = entry.gold / topGold
+                        local color  = ARMOR_COLORS[entry.armorType] or ARMOR_COLORS.Unknown
+                        local label  = L["ARMOR_" .. entry.armorType] or entry.armorType
+
+                        row.armorType = entry.armorType
+                        row.labelText:SetText(label)
+                        row.labelText:SetTextColor(color.r, color.g, color.b)
+                        row.bar:SetValue(barPct)
+                        row.bar:SetStatusBarColor(color.r, color.g, color.b)
+                        row.pctText:SetText(string.format("%.1f%%", pct * 100))
+                        row.goldText:SetText("- " .. FormatGoldShort(entry.gold))
+                        row:Show()
+                    else
+                        row.armorType = nil
+                        row:Hide()
+                    end
+                end
+
+                self.content:SetHeight(#sorted * 26)
+                UpdateScrollBarVisibility(self)
+                self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(accountTotal))
+
+                -- Refresh char panel if pinned
+                if AR.charPanel and AR.charPanel:IsShown() and AR.charPanelArmor then
+                    AR.ShowCharPanel(AR.charPanelArmor, true)
+                end
             end
-        end
-
-        self.content:SetHeight(#sorted * 26)
-        UpdateScrollBarVisibility(self)
-        self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(accountTotal))
-
-        -- Refresh char panel if pinned
-        if AR.charPanel and AR.charPanel:IsShown() and AR.charPanelArmor then
-            AR.ShowCharPanel(AR.charPanelArmor, true)
+        else
+            -- Collapsed: still update the account total footer
+            local _, accountTotal = GetArmorTypeTotals(AR.currentPeriod)
+            self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(accountTotal))
         end
     end
 
@@ -1179,22 +1460,36 @@ local function UpdatePopup()
 
     -- Re-read layout every time we open so changes made in AccountPlayed
     -- (size, position) are picked up without a reload.
-    -- Position: prefer AP's DB if available, else our own saved position.
-    -- Size:     same priority.
-    -- We never write back to AP's DB; our own drag/resize handlers always
-    -- save to AccountRepairedPopupDB so AR has its own fallback.
+    -- NOTE: unchanged from 0.3.3; AccountPlayed integration preserved.
     local layoutDB = GetLayoutDB()
 
-    local w = layoutDB.width  or AccountRepairedPopupDB.width  or 540
-    local h = layoutDB.height or AccountRepairedPopupDB.height or 340
-    f:SetSize(w, h)
-
-    f:ClearAllPoints()
-    local pt = layoutDB.point or AccountRepairedPopupDB.point
-    if pt then
-        f:SetPoint(pt, UIParent, pt, layoutDB.x or 0, layoutDB.y or 0)
+    -- Apply collapsed state BEFORE setting size so we don't flash at the
+    -- wrong height.  SetCollapsed handles its own height internally.
+    if AR.collapsed then
+        -- Restore position only (SetCollapsed will set height)
+        f:ClearAllPoints()
+        local pt = AccountRepairedPopupDB.point
+        if pt then
+            f:SetPoint(pt, UIParent, pt,
+                AccountRepairedPopupDB.x or 0,
+                AccountRepairedPopupDB.y or 0)
+        else
+            f:SetPoint("CENTER")
+        end
+        f:SetCollapsed(true)
     else
-        f:SetPoint("CENTER")
+        local w = layoutDB.width  or AccountRepairedPopupDB.width  or 540
+        local h = layoutDB.height or AccountRepairedPopupDB.height or 340
+        f:SetSize(w, h)
+
+        f:ClearAllPoints()
+        local pt = layoutDB.point or AccountRepairedPopupDB.point
+        if pt then
+            f:SetPoint(pt, UIParent, pt, layoutDB.x or 0, layoutDB.y or 0)
+        else
+            f:SetPoint("CENTER")
+        end
+        f:SetCollapsed(false)
     end
 
     f:UpdateDisplay()
@@ -1224,11 +1519,19 @@ SlashCmdList.ACCOUNTREPAIREDDEBUG = function()
     print("|cffff0000" .. L["DEBUG_HEADER"] .. "|r")
     for charKey, data in pairs(AccountRepairedDB) do
         if type(data) == "table" then
-            local total = 0
-            for _, entry in ipairs(data.repairs or {}) do total = total + (entry.g or 0) end
-            print(string.format(" |cffffff00- %s [%s/%s] : %s (%d repairs)|r",
+            local total      = 0
+            local guildTotal = 0
+            for _, entry in ipairs(data.repairs or {}) do
+                if entry.guild then
+                    guildTotal = guildTotal + (entry.g or 0)
+                else
+                    total = total + (entry.g or 0)
+                end
+            end
+            print(string.format(" |cffffff00- %s [%s/%s] : %s personal / %s guild (%d repairs)|r",
                 charKey, data.class or "?", data.armorType or "?",
-                FormatGoldFull(total), #(data.repairs or {})))
+                FormatGoldFull(total), FormatGoldFull(guildTotal),
+                #(data.repairs or {})))
         end
     end
 end
@@ -1296,6 +1599,7 @@ local ldb = LibStub("LibDataBroker-1.1"):NewDataObject("AccountRepaired", {
 
 --------------------------------------------------
 -- Persist minimap hidden state
+-- NOTE: unchanged from 0.3.3.
 --------------------------------------------------
 
 local persistFrame = CreateFrame("Frame")

@@ -1,15 +1,19 @@
 --------------------------------------------------
 -- Account Repaired – Localization (English base)
+-- v0.4.0: Added INCLUDE_GUILD_REPAIRS and GUILD_REPAIRS_TIP keys
+--         that were referenced in code but absent from this file.
 --------------------------------------------------
 local _, addonTable = ...
 addonTable.L = {}
 local L = addonTable.L
 
 -- Window
-L["WINDOW_TITLE"]          = "Account Repaired"
-L["TOTAL"]                 = "Account Total: "
-L["NO_DATA"]               = "No repair data yet. Visit a vendor and repair!"
-L["CURRENT_CHAR_HEADER"]   = "Current Character"
+L["WINDOW_TITLE"]        = "Account Repaired"
+L["TOTAL"]               = "Account Total: "
+L["NO_DATA"]             = "No repair data yet. Visit a vendor and repair!"
+L["CURRENT_CHAR_HEADER"] = "Current Character"
+L["COLLAPSE_WINDOW"]     = "Collapse window"
+L["EXPAND_WINDOW"]       = "Expand window"
 
 -- Periods
 L["PERIOD_DAY"]   = "Today"
@@ -34,15 +38,20 @@ L["CHAR_PANEL_REMOVE_TIP"]  = "Remove this character's data"
 L["CHAR_PANEL_RIGHT_CLICK"] = "Right-click to manage characters"
 L["CLICK_TO_PRINT"]         = "Left-click to print breakdown"
 
+-- Guild repair toggle
+-- but were never defined here, making them untranslatable.
+L["INCLUDE_GUILD_REPAIRS"] = "Guild Repairs"
+L["GUILD_REPAIRS_TIP"]     = "Include repairs paid from the guild bank."
+
 -- Commands
-L["CMD_HELP_HEADER"]      = "Commands:"
-L["CMD_HELP_SHOW_DESC"]   = "Toggle the repair tracking window"
-L["CMD_HELP_MINIMAP_DESC"]= "Toggle the minimap button"
-L["CMD_HELP_RESET_DESC"]  = "Reset minimap button position"
-L["CMD_DELETE_USAGE"]     = "Usage: /ardelete CharName-RealmName"
-L["CMD_DELETE_CONFIRM"]   = "Delete repair data for %s?"
-L["CMD_DELETE_SUCCESS"]   = "Deleted repair data for %s."
-L["CMD_DELETE_NOT_FOUND"] = "Character not found: %s"
+L["CMD_HELP_HEADER"]       = "Commands:"
+L["CMD_HELP_SHOW_DESC"]    = "Toggle the repair tracking window"
+L["CMD_HELP_MINIMAP_DESC"] = "Toggle the minimap button"
+L["CMD_HELP_RESET_DESC"]   = "Reset minimap button position"
+L["CMD_DELETE_USAGE"]      = "Usage: /ardelete CharName-RealmName"
+L["CMD_DELETE_CONFIRM"]    = "Delete repair data for %s?"
+L["CMD_DELETE_SUCCESS"]    = "Deleted repair data for %s."
+L["CMD_DELETE_NOT_FOUND"]  = "Character not found: %s"
 
 -- Notifications
 L["MSG_REPAIR_RECORDED"]  = "Repair recorded: %s"
@@ -63,5 +72,7 @@ L["UNKNOWN"] = "Unknown"
 -- ── Locale override example (zhCN) ──────────────────────────────────────────
 -- local locale = GetLocale()
 -- if locale == "zhCN" then
---     L["WINDOW_TITLE"] = "账号修复记录"
+--     L["WINDOW_TITLE"]            = "账号修复记录"
+--     L["INCLUDE_GUILD_REPAIRS"]   = "公会修理"
+--     L["GUILD_REPAIRS_TIP"]       = "包含由公会银行支付的修理费用。\n切换后图表立即更新。"
 -- end

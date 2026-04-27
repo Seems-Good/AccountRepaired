@@ -3,6 +3,7 @@
 ## Title: Account Repaired
 ## Notes: Track gold spent on repairs per character, grouped by armor type (/arepaired show)
 ## Author: Jeremy-Gstein
+## IconTexture: Interface\Icons\INV_Hammer_20
 ## SavedVariables: AccountRepairedDB, AccountRepairedMinimapDB, AccountRepairedPopupDB
 
 ## X-License: Licensed under the MIT License.
