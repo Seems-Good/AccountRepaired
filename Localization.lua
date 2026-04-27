@@ -1,11 +1,18 @@
 --------------------------------------------------
 -- Account Repaired – Localization (English base)
--- v0.4.0: Added INCLUDE_GUILD_REPAIRS and GUILD_REPAIRS_TIP keys
---         that were referenced in code but absent from this file.
 --------------------------------------------------
 local _, addonTable = ...
 addonTable.L = {}
 local L = addonTable.L
+
+--------------------------------------------------
+-- Addon identity / chat formatting
+--------------------------------------------------
+local VERSION   = "@project-version@"
+local COLOR_BLUE = "|cff00ccff"
+local COLOR_GRAY = "|cff888888"
+
+L["FORMAT_NAME"] = COLOR_BLUE .. "AccountRepaired|r" .. COLOR_GRAY .. "-(" .. VERSION .. ")|r"
 
 -- Window
 L["WINDOW_TITLE"]        = "Account Repaired"
@@ -36,29 +43,35 @@ L["COPPER_ABBREV"] = "c"
 -- Char panel
 L["CHAR_PANEL_REMOVE_TIP"]  = "Remove this character's data"
 L["CHAR_PANEL_RIGHT_CLICK"] = "Right-click to manage characters"
-L["CLICK_TO_PRINT"]         = "Left-click to print breakdown"
+
+-- Bar row tooltips
+L["CLICK_TO_SHARE"]   = "Left-click to share in chat"
+L["RCLICK_CHAR_LIST"] = "Right-click for character list"
 
 -- Guild repair toggle
--- but were never defined here, making them untranslatable.
 L["INCLUDE_GUILD_REPAIRS"] = "Guild Repairs"
 L["GUILD_REPAIRS_TIP"]     = "Include repairs paid from the guild bank."
 
+-- Login message
+-- Shown once on PLAYER_LOGIN:
+--   AccountRepaired-(v0.4.x)  Today: 1.2g  Week: 8.5g  /arepaired
+L["LOGIN_TODAY"] = "Today: "
+L["LOGIN_WEEK"]  = "Week: "
+L["LOGIN_HINT"]  = "Type "   -- precedes the /arepaired hint
+
 -- Commands
-L["CMD_HELP_HEADER"]       = "Commands:"
-L["CMD_HELP_SHOW_DESC"]    = "Toggle the repair tracking window"
-L["CMD_HELP_MINIMAP_DESC"] = "Toggle the minimap button"
-L["CMD_HELP_RESET_DESC"]   = "Reset minimap button position"
-L["CMD_DELETE_USAGE"]      = "Usage: /ardelete CharName-RealmName"
-L["CMD_DELETE_CONFIRM"]    = "Delete repair data for %s?"
-L["CMD_DELETE_SUCCESS"]    = "Deleted repair data for %s."
-L["CMD_DELETE_NOT_FOUND"]  = "Character not found: %s"
+L["CMD_HELP_HEADER"]        = "Commands:"
+L["CMD_HELP_SHOW_DESC"]     = "Toggle the repair tracking window"
+L["CMD_HELP_DEBUG_DESC"]    = "Dump all character repair data to chat"
+L["CMD_DELETE_USAGE"]       = "Usage: /ardelete CharName-RealmName"
+L["CMD_DELETE_USAGE_SHORT"] = "Delete a character's repair history"
+L["CMD_DELETE_CONFIRM"]     = "Delete repair data for %s?"
+L["CMD_DELETE_SUCCESS"]     = "Deleted repair data for %s."
+L["CMD_DELETE_NOT_FOUND"]   = "Character not found: %s"
 
 -- Notifications
-L["MSG_REPAIR_RECORDED"]  = "Repair recorded: %s"
-L["MSG_MINIMAP_HIDDEN"]   = "Minimap button hidden. Type /arepaired minimap to show."
-L["MSG_MINIMAP_SHOWN"]    = "Minimap button shown."
-L["MSG_MINIMAP_NOT_INIT"] = "Minimap button not yet initialized."
-L["DB_CORRUPTED"]         = "AccountRepairedDB was corrupted and has been reset."
+L["MSG_REPAIR_RECORDED"] = "Repair recorded: %s"
+L["DB_CORRUPTED"]        = "AccountRepairedDB was corrupted and has been reset."
 
 -- Debug
 L["DEBUG_HEADER"] = "AccountRepaired – Character Data:"
@@ -72,7 +85,9 @@ L["UNKNOWN"] = "Unknown"
 -- ── Locale override example (zhCN) ──────────────────────────────────────────
 -- local locale = GetLocale()
 -- if locale == "zhCN" then
---     L["WINDOW_TITLE"]            = "账号修复记录"
---     L["INCLUDE_GUILD_REPAIRS"]   = "公会修理"
---     L["GUILD_REPAIRS_TIP"]       = "包含由公会银行支付的修理费用。\n切换后图表立即更新。"
+--     L["WINDOW_TITLE"]          = "账号修复记录"
+--     L["INCLUDE_GUILD_REPAIRS"] = "公会修理"
+--     L["GUILD_REPAIRS_TIP"]     = "包含由公会银行支付的修理费用。"
+--     L["LOGIN_TODAY"]           = "今日: "
+--     L["LOGIN_WEEK"]            = "本周: "
 -- end

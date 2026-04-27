@@ -4,16 +4,12 @@
 ## Notes: Track gold spent on repairs per character, grouped by armor type (/arepaired show)
 ## Author: Jeremy-Gstein
 ## IconTexture: Interface\Icons\INV_Hammer_20
-## SavedVariables: AccountRepairedDB, AccountRepairedMinimapDB, AccountRepairedPopupDB
+## SavedVariables: AccountRepairedDB, AccountRepairedPopupDB
 
 ## X-License: Licensed under the MIT License.
 ## X-Website: https://github.com/Seems-Good/AccountRepaired
 ## X-Curse-Project-ID: 1517434
 ## X-Wago-ID: 96ELRYNg
 
-Libs\LibStub.lua
-Libs\CallbackHandler-1.0.lua
-Libs\LibDataBroker-1.1.lua
 Localization.lua
 AccountRepaired.lua
-MinimapButton.lua
