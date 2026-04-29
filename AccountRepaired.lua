@@ -1444,7 +1444,7 @@ local function CreatePopup()
 
     if acct == 0 then
       -- No personal data
-      AR.popupRows[1].labelText:SetText(L["NO_DATA"])
+      AR.popupRows[1].labelText:SetText("No Repairs Yet")
       AR.popupRows[1].bar:SetValue(0)
       AR.popupRows[1].pctText:SetText("")
       AR.popupRows[1].goldText:SetText("")
@@ -1572,11 +1572,10 @@ local function RefreshAPStrip()
   -- Label: clickable orange "⚒ Repairs" prefix
   -- Stats: Today / Week / Month / All  (same cadence as Account Played)
   apf._arStrip.statsText:SetText(string.format(
-    "Today: %s  Week: %s  Month: %s  AllTime: %s",
+    "Today: %s  Week: %s  Month: %s",
     FormatGoldShort(stats.day),
     FormatGoldShort(stats.week),
-    FormatGoldShort(stats.month),
-    FormatGoldShort(stats.all)))
+    FormatGoldShort(stats.month)))
 end
 
 AR.TryInjectAccountPlayedButton = function()
@@ -1598,7 +1597,7 @@ AR.TryInjectAccountPlayedButton = function()
 
     -- "Repairs" — clickable label with border, opens our window
     local prefixBtn = CreateFrame("Button", nil, strip, "BackdropTemplate")
-    prefixBtn:SetSize(56, 18)
+    prefixBtn:SetSize(100, 18)
     prefixBtn:SetPoint("LEFT", strip, "LEFT", 0, 0)
     prefixBtn:SetBackdrop({
       bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -1612,7 +1611,7 @@ AR.TryInjectAccountPlayedButton = function()
     prefixLbl:SetAllPoints()
     prefixLbl:SetJustifyH("CENTER")
     prefixLbl:SetWordWrap(false)
-    prefixLbl:SetText("|cffFFAA33Repairs|r")
+    prefixLbl:SetText("|cffFFAA33Account Repaired|r")
 
     prefixBtn:SetScript("OnEnter", function()
       prefixBtn:SetBackdropBorderColor(1.0, 0.75, 0.3, 1.0)
