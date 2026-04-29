@@ -1,7 +1,7 @@
 ## Interface: 120000, 120001, 120005
 ## Version: @project-version@
 ## Title: Account Repaired
-## Notes: Track gold spent on repairs per character, grouped by armor type (/arepaired show)
+## Notes: Track gold spent on repairs per character, grouped by armor type (/arepaired)
 ## Author: Jeremy-Gstein
 ## IconTexture: Interface\Icons\INV_Hammer_20
 ## SavedVariables: AccountRepairedDB, AccountRepairedPopupDB
