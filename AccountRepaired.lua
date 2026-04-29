@@ -234,8 +234,18 @@ end
 --------------------------------------------------
 -- Period helpers
 --------------------------------------------------
+-- Returns the unix timestamp of the start of the current period.
+-- For "day" we use the actual daily quest reset (wall-clock), not a
+-- rolling 24-hour window, so the counter zeroes at the correct server time.
+local function GetDayResetTimestamp()
+  local secsUntilReset = GetQuestResetTime() or 86400
+  -- time() + secsUntilReset = next reset; subtract 86400 = last reset
+  return time() + secsUntilReset - 86400
+end
+
 local function GetPeriodStart(period)
   if period == "all" or not PERIOD_SECONDS[period] then return 0 end
+  if period == "day" then return GetDayResetTimestamp() end
   return time() - PERIOD_SECONDS[period]
 end
 
@@ -330,14 +340,15 @@ local function GetCurrentCharAllPeriods()
   local cd = AccountRepairedDB[GetCharKey(realm, name)]
   local stats = { day=0, week=0, month=0, all=0 }
   if cd and cd.repairs then
-    local now = time()
+    local now      = time()
+    local dayStart = GetDayResetTimestamp()   -- wall-clock reset, not rolling 24h
     for _, e in ipairs(cd.repairs) do
       if not e.guild then
         local t, g = e.t or 0, e.g or 0
         stats.all = stats.all + g
-        if t >= now - 86400   then stats.day   = stats.day   + g end
-        if t >= now - 604800  then stats.week  = stats.week  + g end
-        if t >= now - 2592000 then stats.month = stats.month + g end
+        if t >= dayStart          then stats.day   = stats.day   + g end
+        if t >= now - 604800      then stats.week  = stats.week  + g end
+        if t >= now - 2592000     then stats.month = stats.month + g end
       end
     end
   end
@@ -1585,23 +1596,37 @@ AR.TryInjectAccountPlayedButton = function()
     strip:SetPoint("BOTTOMLEFT",  apf, "BOTTOMLEFT",  160, 8)
     strip:SetPoint("BOTTOMRIGHT", apf, "BOTTOMRIGHT", -72, 8)
 
-    -- "Repairs" — clickable label, opens our window
-    local prefixBtn = CreateFrame("Button", nil, strip)
-    prefixBtn:SetSize(52, 16)
+    -- "Repairs" — clickable label with border, opens our window
+    local prefixBtn = CreateFrame("Button", nil, strip, "BackdropTemplate")
+    prefixBtn:SetSize(56, 18)
     prefixBtn:SetPoint("LEFT", strip, "LEFT", 0, 0)
+    prefixBtn:SetBackdrop({
+      bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+      tile=true, tileSize=16, edgeSize=10,
+      insets={ left=3, right=3, top=3, bottom=3 },
+    })
+    prefixBtn:SetBackdropColor(0.05, 0.05, 0.05, 0.85)
+    prefixBtn:SetBackdropBorderColor(1.0, 0.55, 0.1, 0.9)
     local prefixLbl = prefixBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     prefixLbl:SetAllPoints()
-    prefixLbl:SetJustifyH("LEFT")
+    prefixLbl:SetJustifyH("CENTER")
     prefixLbl:SetWordWrap(false)
     prefixLbl:SetText("|cffFFAA33Repairs|r")
 
     prefixBtn:SetScript("OnEnter", function()
+      prefixBtn:SetBackdropBorderColor(1.0, 0.75, 0.3, 1.0)
+      prefixBtn:SetBackdropColor(0.12, 0.07, 0.01, 0.95)
       GameTooltip:SetOwner(prefixBtn, "ANCHOR_TOP")
       GameTooltip:AddLine("Account Repaired", 1.0, 0.67, 0.2)
       GameTooltip:AddLine("Click to open repair statistics", 0.8, 0.8, 0.8)
       GameTooltip:Show()
     end)
-    prefixBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    prefixBtn:SetScript("OnLeave", function()
+      prefixBtn:SetBackdropBorderColor(1.0, 0.55, 0.1, 0.9)
+      prefixBtn:SetBackdropColor(0.05, 0.05, 0.05, 0.85)
+      GameTooltip:Hide()
+    end)
     prefixBtn:SetScript("OnClick", function()
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
       if AccountPlayed and AccountPlayed.ToggleClassWindow then
@@ -1612,7 +1637,7 @@ AR.TryInjectAccountPlayedButton = function()
 
     -- Stats text — fills the rest of the strip to the right of the prefix
     local statsText = strip:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    statsText:SetPoint("LEFT",  prefixBtn, "RIGHT", 4, 0)
+    statsText:SetPoint("LEFT",  prefixBtn, "RIGHT", 6, 0)
     statsText:SetPoint("RIGHT", strip,     "RIGHT", 0, 0)
     statsText:SetJustifyH("LEFT")
     statsText:SetWordWrap(false)
