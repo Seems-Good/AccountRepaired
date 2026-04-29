@@ -111,21 +111,21 @@ ls-classic:
 ls target:
   ls -larth "{{ if target == "beta" { beta_path } else if target == "classic" { classic_path } else { retail_path } }}/{{ addon_name }}"
 
-# list beta dir with changes 
+# cd beta dir 
 cd-beta:
   @just cd beta
 
-# list retail dir with changes 
+# cd retail dir
 cd-retail:
   @just cd retail
 
-# list classic dir with changes 
+# cd classic dir
 cd-classic:
   @just cd classic
 
 # cd _path (prints pwd helper to get back)
 cd target:
-  pwd && cd "{{ if target == "beta" { beta_path } else if target == "classic" { classic_path } else { retail_path } }}/{{ addon_name }}"
+  vim "{{ if target == "beta" { beta_path } else if target == "classic" { classic_path } else { retail_path } }}/{{ addon_name }}"
 
 # git ci for bigwigs/packager (gh action)
 # example: just build 1.0.0 "some message here"
