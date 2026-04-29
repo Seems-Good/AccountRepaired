@@ -5,14 +5,13 @@
 Features:
 
 * View your account's total gold spent on repairs, grouped by armor type (Cloth / Leather / Mail / Plate)
-* Checkbox to display your guilds contributing repair donations. Uncheck to show only your own gold used.
 * Sorted by (armor type / total account repairs) as a percentage
+* All gold shown is players own. To see guild repair Contributions, Hover over the 'Guild' bar and see each unique Guild with gold donated.
 * Small popup UI (resize, drag, move, and scroll as you please!)
 * Left-Click over armor types to get a popup of list of channels to share your repair statistics with friends
 * Right-click an armor type bar to open a character management panel (delete characters, view breakdown)
 * Filter by Today / Week / Month / All Time 
-* Press Escape to close window
-* Character strip showing your current character's repair costs across all time periods
+* Character panel at the top showing your current character's repair costs across all time periods
 * If [Account Played](https://www.curseforge.com/wow/addons/account-played) is installed, a button will appear to quickly switch to the played time window
 
 Usage:
