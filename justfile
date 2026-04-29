@@ -42,7 +42,7 @@ classic_path := if os == "unix" {
 }
 
 # ADDON FILES (.lua .toc etc..)
-files := "*.lua *.toc Libs/"
+files := "*.lua *.toc"
 
 # just list available commands B)
 _default:
@@ -111,6 +111,22 @@ ls-classic:
 ls target:
   ls -larth "{{ if target == "beta" { beta_path } else if target == "classic" { classic_path } else { retail_path } }}/{{ addon_name }}"
 
+# list beta dir with changes 
+cd-beta:
+  @just cd beta
+
+# list retail dir with changes 
+cd-retail:
+  @just cd retail
+
+# list classic dir with changes 
+cd-classic:
+  @just cd classic
+
+# cd _path (prints pwd helper to get back)
+cd target:
+  pwd && cd "{{ if target == "beta" { beta_path } else if target == "classic" { classic_path } else { retail_path } }}/{{ addon_name }}"
+
 # git ci for bigwigs/packager (gh action)
 # example: just build 1.0.0 "some message here"
 build tag message:
@@ -118,6 +134,11 @@ build tag message:
   git push
   git tag -a "v{{tag}}" -m "Release: v{{tag}} - {{message}}"
   git push origin "v{{tag}}"
+
+# git commit for single file changes
+# example: just commit someFileName "some message here" 
+commit file comment:
+    git add "{{file}}" && git commit -m "{{comment}}"
 
 # fetch and pull latest git repo changes 
 update:
