@@ -107,6 +107,17 @@ local pendingArmorDetect = false
 --       - If guild covered nothing (flag was wrong): delta==full cost, guildPaid==0
 --   If isPersonal:
 --     personalPaid = delta   (record as-is; covers RepairItem single-slot too)
+--
+-- Guild-covers-everything edge case:
+--   When the guild covers 100% of the repair cost, GetMoney() does not
+--   change and PLAYER_MONEY never fires.  The state machine would stay
+--   stuck in "WAITING_MONEY" until the next unrelated money event (e.g.
+--   buying a vendor item), which then gets misattributed as repair gold.
+--   Fix: after RepairAllItems we schedule a C_Timer.After(0) deferred
+--   callback.  If PLAYER_MONEY fires first (partial payment) it calls
+--   ResetRepairState() and the timer's phase-guard skips it.  If
+--   PLAYER_MONEY never fires the timer records the full cost as guild-paid
+--   and resets state cleanly.
 --------------------------------------------------
 local repair = {
   phase      = "IDLE",   -- "IDLE" | "WAITING_MONEY"
@@ -438,11 +449,34 @@ hooksecurefunc("RepairAllItems", function(useGuild)
   local cost = GetRepairAllCost()
   if not cost or cost <= 0 then return end
 
-  repair.phase       = "WAITING_MONEY"
-  repair.isGuild     = useGuild and true or false
-  repair.cost        = cost
-  repair.moneyBefore = GetMoney()
+  repair.phase        = "WAITING_MONEY"
+  repair.isGuild      = useGuild and true or false
+  repair.cost         = cost
+  repair.moneyBefore  = GetMoney()
   repair.isSingleItem = false
+
+  -- Guild-covers-everything fix:
+  -- When the guild pays 100% of the repair cost the player's money does not
+  -- change, so PLAYER_MONEY never fires and the state machine gets stuck in
+  -- "WAITING_MONEY".  The next unrelated money event (e.g. buying a vendor
+  -- item) would then be misattributed as repair gold.
+  --
+  -- We schedule a zero-delay callback.  Execution is deferred until after
+  -- the current event frame, so PLAYER_MONEY (if it fires for a partial
+  -- payment) will always run first and call ResetRepairState() before this
+  -- callback executes.  The phase-guard then skips the callback safely.
+  -- If PLAYER_MONEY never fires we record the full cost as guild-paid here.
+  if useGuild then
+    C_Timer.After(0, function()
+      if repair.phase ~= "WAITING_MONEY" then return end  -- already handled by PLAYER_MONEY
+      local delta        = repair.moneyBefore - GetMoney()
+      local personalPaid = math.max(0, delta)
+      local guildPaid    = math.max(0, repair.cost - personalPaid)
+      if guildPaid    > 0 then RecordRepair(guildPaid,    true)  end
+      if personalPaid > 0 then RecordRepair(personalPaid, false) end
+      ResetRepairState()
+    end)
+  end
 end)
 
 -- RepairItem: single slot — we don't know exact cost ahead of time,
@@ -504,34 +538,39 @@ AR.mainFrame:SetScript("OnEvent", function(self, event, ...)
   -- ── PLAYER_MONEY ────────────────────────────────────────────────────────
   elseif event == "PLAYER_MONEY" then
     if inMerchant and repair.phase == "WAITING_MONEY" then
-      local moneyNow    = GetMoney()
-      local delta       = repair.moneyBefore - moneyNow   -- gold left pocket (>= 0 if we paid)
+      local moneyNow = GetMoney()
+      local delta    = repair.moneyBefore - moneyNow   -- gold left pocket (>= 0 if we paid)
 
-      if repair.isSingleItem then
+      -- Guild-covers-everything guard:
+      -- If this is a guild repair and delta is zero, the C_Timer.After(0)
+      -- callback scheduled in the RepairAllItems hook will handle recording.
+      -- Ignore this zero-delta event here to avoid double-recording or a
+      -- premature ResetRepairState() that would let a later money event
+      -- (e.g. the timer itself triggering indirectly) misfire.
+      if delta == 0 and repair.isGuild then
+        -- do nothing; deferred timer handles the full-guild-coverage case
+      elseif repair.isSingleItem then
         -- Single item repair always uses personal gold; delta IS the cost.
         if delta > 0 then
           RecordRepair(delta, false)
         end
-
+        ResetRepairState()
       elseif repair.isGuild then
         -- Guild repair: player may have paid nothing, partial, or all.
         --   personalPaid = delta              (actual money leaving pocket)
         --   guildPaid    = cost - personalPaid (remainder from guild bank)
-        local cost         = repair.cost
         local personalPaid = math.max(0, delta)
-        local guildPaid    = math.max(0, cost - personalPaid)
-
+        local guildPaid    = math.max(0, repair.cost - personalPaid)
         if guildPaid    > 0 then RecordRepair(guildPaid,    true)  end
         if personalPaid > 0 then RecordRepair(personalPaid, false) end
-
+        ResetRepairState()
       else
         -- Personal repair; delta is what we spent.
         if delta > 0 then
           RecordRepair(delta, false)
         end
+        ResetRepairState()
       end
-
-      ResetRepairState()
     end
 
     if AR.popupFrame and AR.popupFrame:IsShown() then
