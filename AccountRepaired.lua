@@ -12,29 +12,39 @@ local AR = AccountRepaired
 --------------------------------------------------
 AccountRepairedDB      = AccountRepairedDB or {}
 AccountRepairedPopupDB = AccountRepairedPopupDB or {}
+local DB
 
-local DB = AccountRepairedPopupDB
-if DB.width          == nil then DB.width          = 540  end
-if DB.height         == nil then DB.height         = 320  end
-if DB.point          == nil then DB.point          = "CENTER" end
-if DB.x              == nil then DB.x              = 0    end
-if DB.y              == nil then DB.y              = 0    end
-if DB.period         == nil then DB.period         = "all" end
-if DB.showGuildUsageBar == nil then DB.showGuildUsageBar = true end
+-- need to be defined before InitDB
+local MIN_W, MIN_H = 440, 190
+local MAX_W, MAX_H = 680, 260
+
+local function InitDB()
+    AccountRepairedDB      = AccountRepairedDB      or {}
+    AccountRepairedPopupDB = AccountRepairedPopupDB or {}
+    DB = AccountRepairedPopupDB
+    if DB.width  == nil then DB.width  = 540      end
+    if DB.height == nil then DB.height = 260      end
+    if DB.point  == nil then DB.point  = "CENTER" end
+    if DB.x      == nil then DB.x      = 0        end
+    if DB.y      == nil then DB.y      = 0        end
+    if DB.period == nil then DB.period = "all"    end
+    if DB.height > MAX_H then DB.height = MAX_H   end
+    AR.currentPeriod = DB.period
+end
 
 --------------------------------------------------
 -- Constants
 --------------------------------------------------
 local DATA_RETENTION_SECONDS = 365 * 2 * 86400
 
-local MIN_W, MIN_H = 440, 220
-local MAX_W, MAX_H = 680, 320     -- height capped at default; shrink only
+--local MIN_W, MIN_H = 440, 190
+--local MAX_W, MAX_H = 680, 260
+
+-- Clamp any previously-saved height to the new tighter ceiling
+-- if AccountRepairedPopupDB.height > MAX_H then AccountRepairedPopupDB.height = MAX_H end
 
 local PERIOD_SECONDS = { day=86400, week=604800, month=2592000, all=0 }
 local PERIOD_ORDER   = { "day", "week", "month", "all" }
-
--- Evoker green for guild
-local GUILD_COLOR = { r=0.20, g=0.92, b=0.60 }
 
 local ARMOR_COLORS = {
   Cloth   = { r=0.78, g=0.78, b=0.85 },
@@ -53,14 +63,9 @@ local CHAT_CHANNELS = {
   { key="PARTY",   label="Party",        color={0.5, 0.5, 1.0} },
   { key="RAID",    label="Raid",         color={1.0, 0.5, 0.0} },
   { key="GUILD",   label="Guild",        color={0.3, 1.0, 0.3} },
-  { key="OFFICER", label="Officer",      color={0.3, 0.8, 0.3} },
+  --{ key="OFFICER", label="Officer",      color={0.3, 0.8, 0.3} },
   { key="NONE",    label="None (print)", color={0.6, 0.6, 0.6} },
 }
-
--- Sentinel used when GetGuildInfo returns nil for a guild repair entry.
--- Never shown directly; display layer replaces it with the player's current
--- guild name so old nil-guildName legacy data is also covered.
-local GUILD_UNKNOWN_KEY = "__unknown__"
 
 local CPANEL_W        = 240
 local CPANEL_ROW_H    = 22
@@ -68,71 +73,33 @@ local CPANEL_HEADER_H = 28
 local CPANEL_PAD      = 6
 local BAR_ROW_H       = 26
 
+local POPUP_STRIP_Y  = -68
+local POPUP_SF_Y     = -112
+
 --------------------------------------------------
 -- State
 --------------------------------------------------
-AR.mainFrame  = CreateFrame("Frame")
-AR.popupFrame = nil
-AR.popupRows  = {}
-AR.guildRow   = nil
-AR.charPanel  = nil
+AR.mainFrame      = CreateFrame("Frame")
+AR.popupFrame     = nil
+AR.popupRows      = {}
+AR.charPanel      = nil
 AR.charPanelArmor = nil
-AR.guildPanel = nil
-AR.currentPeriod = DB.period
+AR.currentPeriod  = "all"
 
 local inMerchant         = false
 local pendingArmorDetect = false
 
 --------------------------------------------------
 -- Repair state machine
---
--- Phase 1 (MERCHANT_SHOW / RepairAllItems hook):
---   Snapshot money before repair fires.
---
--- Phase 2 (RepairAllItems / RepairItem hook):
---   Record (repairType, slot) and set phase = "WAITING_MONEY".
---
--- Phase 3 (PLAYER_MONEY):
---   delta = moneyBefore - moneyNow
---   If isGuild:
---     guildDelta  = how much guild bank balance dropped  (not reliable via API)
---     We instead query GetGuildBankWithdrawMoney is not useful here.
---     Better approach: use CanGuildBankRepair + compare guild-paid cap.
---     Simplest correct approach:
---       personalPaid = max(0, delta)          -- actual gold left player's pocket
---       guildPaid    = repairCost - personalPaid  -- remainder came from guild
---     This works because:
---       - If guild covered all: delta==0, guildPaid==full cost
---       - If guild covered partial: delta>0, split correctly
---       - If guild covered nothing (flag was wrong): delta==full cost, guildPaid==0
---   If isPersonal:
---     personalPaid = delta   (record as-is; covers RepairItem single-slot too)
---
--- Guild-covers-everything edge case:
---   When the guild covers 100% of the repair cost, GetMoney() does not
---   change and PLAYER_MONEY never fires.  The state machine would stay
---   stuck in "WAITING_MONEY" until the next unrelated money event (e.g.
---   buying a vendor item), which then gets misattributed as repair gold.
---   Fix: after RepairAllItems we schedule a C_Timer.After(0) deferred
---   callback.  If PLAYER_MONEY fires first (partial payment) it calls
---   ResetRepairState() and the timer's phase-guard skips it.  If
---   PLAYER_MONEY never fires the timer records the full cost as guild-paid
---   and resets state cleanly.
 --------------------------------------------------
 local repair = {
-  phase      = "IDLE",   -- "IDLE" | "WAITING_MONEY"
-  isGuild    = false,
-  cost       = 0,        -- cost reported by API at hook time (full repair or 0 for single)
-  moneyBefore = 0,
-  isSingleItem = false,
+  phase        = "IDLE",
+  moneyBefore  = 0,
 }
 
 local function ResetRepairState()
-  repair.phase        = "IDLE"
-  repair.isGuild      = false
-  repair.cost         = 0
-  repair.moneyBefore  = 0
-  repair.isSingleItem = false
+  repair.phase       = "IDLE"
+  repair.moneyBefore = 0
 end
 
 --------------------------------------------------
@@ -155,7 +122,7 @@ end
 -- Armor detection
 --------------------------------------------------
 local function DetectArmorType()
-  local counts  = {}
+  local counts   = {}
   local allReady = true
   for _, slotID in ipairs(ARMOR_SLOTS) do
     local itemID = GetInventoryItemID("player", slotID)
@@ -227,6 +194,33 @@ local function FormatGoldShort(copper)
   return string.format("|cffCD7F32%d|rc", copper)
 end
 
+local function FormatGoldRounded(copper)
+  copper = math.floor(tonumber(copper) or 0)
+  if copper <= 0 then return "|cffAAAAAA0g|r" end
+  local gv = copper / 10000
+  if gv >= 1 then
+    if gv >= 1000 then
+      return string.format("|cffFFD700%d|rk", math.floor(gv / 1000 + 0.5))
+    else
+      local rounded_k = math.floor(gv / 1000 + 0.5)
+      if gv >= 1000 - 50 then
+        return string.format("|cffFFD700%d|rk", rounded_k)
+      end
+      if gv >= 100 then
+        local r = math.floor(gv / 100 + 0.5) * 100
+        if r >= 1000 then
+          return string.format("|cffFFD700%d|rk", r / 1000)
+        end
+        return string.format("|cffFFD700%d|rg", r)
+      end
+      return string.format("|cffFFD700%d|rg", math.floor(gv + 0.5))
+    end
+  end
+  local sv = copper / 100
+  if sv >= 1 then return string.format("|cffC0C0C0%d|rs", math.floor(sv)) end
+  return string.format("|cffCD7F32%d|rc", copper)
+end
+
 local function FormatGoldPlain(copper)
   copper = math.floor(tonumber(copper) or 0)
   if copper <= 0 then return "0g" end
@@ -245,12 +239,8 @@ end
 --------------------------------------------------
 -- Period helpers
 --------------------------------------------------
--- Returns the unix timestamp of the start of the current period.
--- For "day" we use the actual daily quest reset (wall-clock), not a
--- rolling 24-hour window, so the counter zeroes at the correct server time.
 local function GetDayResetTimestamp()
   local secsUntilReset = GetQuestResetTime() or 86400
-  -- time() + secsUntilReset = next reset; subtract 86400 = last reset
   return time() + secsUntilReset - 86400
 end
 
@@ -260,17 +250,14 @@ local function GetPeriodStart(period)
   return time() - PERIOD_SECONDS[period]
 end
 
-local PERIOD_LABELS
 local function GetPeriodLabel(period)
-  if not PERIOD_LABELS then
-    PERIOD_LABELS = {
-      day   = L["PERIOD_DAY"],
-      week  = L["PERIOD_WEEK"],
-      month = L["PERIOD_MONTH"],
-      all   = L["PERIOD_ALL"],
-    }
-  end
-  return PERIOD_LABELS[period] or period
+  local labels = {
+    day   = L["PERIOD_DAY"],
+    week  = L["PERIOD_WEEK"],
+    month = L["PERIOD_MONTH"],
+    all   = L["PERIOD_ALL"],
+  }
+  return labels[period] or period
 end
 
 local function GetPeriodContextLabel(period)
@@ -286,7 +273,7 @@ local function GetPeriodContextLabel(period)
     end
   elseif period == "week"  then return "last 7 days"
   elseif period == "month" then return "last 30 days"
-  elseif period == "all"   then return "all time"
+  elseif period == "all"   then return "all time (last 2 years)"
   end
   return period
 end
@@ -294,16 +281,12 @@ end
 --------------------------------------------------
 -- Data aggregation
 --------------------------------------------------
-local function GetCharRepairsInPeriod(cd, periodStart, guildOnly)
+local function GetCharRepairsInPeriod(cd, periodStart)
   local total = 0
   if not (cd and cd.repairs) then return 0 end
   for _, e in ipairs(cd.repairs) do
     if (e.t or 0) >= periodStart then
-      if guildOnly then
-        if e.guild then total = total + (e.g or 0) end
-      else
-        if not e.guild then total = total + (e.g or 0) end
-      end
+      total = total + (e.g or 0)
     end
   end
   return total
@@ -315,7 +298,7 @@ local function GetArmorTypeTotals(period)
   for _, cd in pairs(AccountRepairedDB) do
     if type(cd) == "table" and cd.repairs then
       local at  = cd.armorType or "Unknown"
-      local amt = GetCharRepairsInPeriod(cd, ps, false)
+      local amt = GetCharRepairsInPeriod(cd, ps)
       if amt > 0 then
         totals[at] = (totals[at] or 0) + amt
         acct = acct + amt
@@ -330,7 +313,7 @@ local function GetCharactersByArmorType(armorType, period)
   local ps = GetPeriodStart(period)
   for charKey, cd in pairs(AccountRepairedDB) do
     if type(cd) == "table" and (cd.armorType or "Unknown") == armorType then
-      local amt = GetCharRepairsInPeriod(cd, ps, false)
+      local amt = GetCharRepairsInPeriod(cd, ps)
       if amt > 0 then
         table.insert(chars, {
           key       = charKey,
@@ -352,47 +335,22 @@ local function GetCurrentCharAllPeriods()
   local stats = { day=0, week=0, month=0, all=0 }
   if cd and cd.repairs then
     local now      = time()
-    local dayStart = GetDayResetTimestamp()   -- wall-clock reset, not rolling 24h
+    local dayStart = GetDayResetTimestamp()
     for _, e in ipairs(cd.repairs) do
-      if not e.guild then
-        local t, g = e.t or 0, e.g or 0
-        stats.all = stats.all + g
-        if t >= dayStart          then stats.day   = stats.day   + g end
-        if t >= now - 604800      then stats.week  = stats.week  + g end
-        if t >= now - 2592000     then stats.month = stats.month + g end
-      end
+      local t, g = e.t or 0, e.g or 0
+      stats.all = stats.all + g
+      if t >= dayStart      then stats.day   = stats.day   + g end
+      if t >= now - 604800  then stats.week  = stats.week  + g end
+      if t >= now - 2592000 then stats.month = stats.month + g end
     end
   end
   return stats, cd
 end
 
-local function GetGuildUsageTotals(period)
-  local totals = {}
-  local ps = GetPeriodStart(period)
-  -- Resolve the fallback name once per call: use current guild if available,
-  -- otherwise a localised "Unknown" display string.
-  local fallbackName = GetGuildInfo("player") or L["UNKNOWN"]
-  for _, cd in pairs(AccountRepairedDB) do
-    if type(cd) == "table" and cd.repairs then
-      for _, e in ipairs(cd.repairs) do
-        if (e.t or 0) >= ps and e.guild then
-          -- Normalise: nil (legacy) and the sentinel both map to fallbackName.
-          local gname = e.guildName
-          if not gname or gname == GUILD_UNKNOWN_KEY then
-            gname = fallbackName
-          end
-          totals[gname] = (totals[gname] or 0) + (e.g or 0)
-        end
-      end
-    end
-  end
-  return totals
-end
-
 --------------------------------------------------
--- Record repair (internal, handles pruning)
+-- Record repair
 --------------------------------------------------
-local function RecordRepair(copper, isGuild)
+local function RecordRepair(copper, source)
   if copper <= 0 then return end
   local realm, name = GetCharInfo()
   local charKey = GetCharKey(realm, name)
@@ -408,19 +366,9 @@ local function RecordRepair(copper, isGuild)
   if armorType ~= "Unknown" then cd.armorType = armorType end
   cd.armorType = cd.armorType or "Unknown"
 
-  local entry = { t=time(), g=copper }
-  if isGuild then
-    entry.guild = true
-    local gname = GetGuildInfo("player")
-    -- Always store a non-nil key so delete matching is unambiguous.
-    -- If GetGuildInfo isn't available yet use the sentinel; the display
-    -- layer will substitute the current guild name at read-time.
-    entry.guildName = gname or GUILD_UNKNOWN_KEY
-  end
-  table.insert(cd.repairs, entry)
+  table.insert(cd.repairs, { t=time(), g=copper })
 
-  -- Prune old entries
-  local cutoff = time() - DATA_RETENTION_SECONDS
+  local cutoff  = time() - DATA_RETENTION_SECONDS
   local repairs = cd.repairs
   local firstOK = 1
   while firstOK <= #repairs and (repairs[firstOK].t or 0) < cutoff do
@@ -432,63 +380,42 @@ local function RecordRepair(copper, isGuild)
     for i = keep + 1, #repairs do repairs[i] = nil end
   end
 
+  local fundTag = (source == "guild") and "|cff33ff33[Guild]|r " or ""
+  print(string.format("%s Repaired %sfor %s",
+    L["FORMAT_NAME"], fundTag, FormatGoldFull(copper)))
+
   if AR.popupFrame and AR.popupFrame:IsShown() then
     AR.popupFrame:UpdateDisplay()
   end
-  -- Keep the Account Played strip current (AR.RefreshAPStrip set after its
-  -- definition; safe to call via the table reference even before that line).
   if AR.RefreshAPStrip then AR.RefreshAPStrip() end
 end
 
 --------------------------------------------------
 -- Repair hook handlers
 --------------------------------------------------
--- RepairAllItems: guild flag tells us intent; cost from API is reliable here.
-hooksecurefunc("RepairAllItems", function(useGuild)
+hooksecurefunc("RepairAllItems", function(useGuildFunds)
   if not inMerchant then return end
+
+  if useGuildFunds then
+    local cost = GetRepairAllCost()
+    if cost and cost > 0 then
+      RecordRepair(cost, "guild")
+    end
+    return
+  end
+
   local cost = GetRepairAllCost()
   if not cost or cost <= 0 then return end
-
-  repair.phase        = "WAITING_MONEY"
-  repair.isGuild      = useGuild and true or false
-  repair.cost         = cost
-  repair.moneyBefore  = GetMoney()
-  repair.isSingleItem = false
-
-  -- Guild-covers-everything fix:
-  -- When the guild pays 100% of the repair cost the player's money does not
-  -- change, so PLAYER_MONEY never fires and the state machine gets stuck in
-  -- "WAITING_MONEY".  The next unrelated money event (e.g. buying a vendor
-  -- item) would then be misattributed as repair gold.
-  --
-  -- We schedule a zero-delay callback.  Execution is deferred until after
-  -- the current event frame, so PLAYER_MONEY (if it fires for a partial
-  -- payment) will always run first and call ResetRepairState() before this
-  -- callback executes.  The phase-guard then skips the callback safely.
-  -- If PLAYER_MONEY never fires we record the full cost as guild-paid here.
-  if useGuild then
-    C_Timer.After(0, function()
-      if repair.phase ~= "WAITING_MONEY" then return end  -- already handled by PLAYER_MONEY
-      local delta        = repair.moneyBefore - GetMoney()
-      local personalPaid = math.max(0, delta)
-      local guildPaid    = math.max(0, repair.cost - personalPaid)
-      if guildPaid    > 0 then RecordRepair(guildPaid,    true)  end
-      if personalPaid > 0 then RecordRepair(personalPaid, false) end
-      ResetRepairState()
-    end)
-  end
+  repair.phase       = "WAITING_MONEY"
+  repair.moneyBefore = GetMoney()
 end)
 
--- RepairItem: single slot — we don't know exact cost ahead of time,
--- so record 0 as cost and derive the amount purely from money delta.
 if RepairItem then
-  hooksecurefunc("RepairItem", function(--[[slot]])
-    if not inMerchant then return end
-    repair.phase        = "WAITING_MONEY"
-    repair.isGuild      = false   -- single-item repair always uses personal gold
-    repair.cost         = 0       -- unknown; derive from delta
-    repair.moneyBefore  = GetMoney()
-    repair.isSingleItem = true
+  hooksecurefunc("RepairItem", function(_, useGuildFunds)
+    if not inMerchant  then return end
+    if useGuildFunds   then return end
+    repair.phase       = "WAITING_MONEY"
+    repair.moneyBefore = GetMoney()
   end)
 end
 
@@ -503,74 +430,41 @@ AR.mainFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 AR.mainFrame:RegisterEvent("ITEM_DATA_LOAD_RESULT")
 
 AR.mainFrame:SetScript("OnEvent", function(self, event, ...)
-  -- ── PLAYER_LOGIN ────────────────────────────────────────────────────────
   if event == "PLAYER_LOGIN" then
+    InitDB()
     C_Timer.After(2, RefreshCharArmorType)
     C_Timer.After(3, function()
       local stats = GetCurrentCharAllPeriods()
-      print(string.format("%s %s|cffFFD700%s|r %s|cffFFD700%s|r |cff888888/arepaired|r",
+      print(string.format("%s %s|cffFFD700%s|r %s|cffFFD700%s|r |cffffA500/arepaired|r",
         L["FORMAT_NAME"], L["LOGIN_TODAY"], FormatGoldShort(stats.day),
         L["LOGIN_WEEK"], FormatGoldShort(stats.week)))
     end)
     C_Timer.After(1, AR.TryInjectAccountPlayedButton)
 
-  -- ── ITEM_DATA_LOAD_RESULT ───────────────────────────────────────────────
   elseif event == "ITEM_DATA_LOAD_RESULT" then
     if pendingArmorDetect then
       pendingArmorDetect = false
       RefreshCharArmorType()
     end
 
-  -- ── MERCHANT_SHOW ───────────────────────────────────────────────────────
   elseif event == "MERCHANT_SHOW" then
     inMerchant = true
     ResetRepairState()
 
-  -- ── MERCHANT_CLOSED ─────────────────────────────────────────────────────
   elseif event == "MERCHANT_CLOSED" then
     inMerchant = false
     ResetRepairState()
 
-  -- ── PLAYER_EQUIPMENT_CHANGED ────────────────────────────────────────────
   elseif event == "PLAYER_EQUIPMENT_CHANGED" then
-    -- nothing to do now; armor type is read at record time
+    C_Timer.After(0.5, RefreshCharArmorType)
 
-  -- ── PLAYER_MONEY ────────────────────────────────────────────────────────
   elseif event == "PLAYER_MONEY" then
     if inMerchant and repair.phase == "WAITING_MONEY" then
-      local moneyNow = GetMoney()
-      local delta    = repair.moneyBefore - moneyNow   -- gold left pocket (>= 0 if we paid)
-
-      -- Guild-covers-everything guard:
-      -- If this is a guild repair and delta is zero, the C_Timer.After(0)
-      -- callback scheduled in the RepairAllItems hook will handle recording.
-      -- Ignore this zero-delta event here to avoid double-recording or a
-      -- premature ResetRepairState() that would let a later money event
-      -- (e.g. the timer itself triggering indirectly) misfire.
-      if delta == 0 and repair.isGuild then
-        -- do nothing; deferred timer handles the full-guild-coverage case
-      elseif repair.isSingleItem then
-        -- Single item repair always uses personal gold; delta IS the cost.
-        if delta > 0 then
-          RecordRepair(delta, false)
-        end
-        ResetRepairState()
-      elseif repair.isGuild then
-        -- Guild repair: player may have paid nothing, partial, or all.
-        --   personalPaid = delta              (actual money leaving pocket)
-        --   guildPaid    = cost - personalPaid (remainder from guild bank)
-        local personalPaid = math.max(0, delta)
-        local guildPaid    = math.max(0, repair.cost - personalPaid)
-        if guildPaid    > 0 then RecordRepair(guildPaid,    true)  end
-        if personalPaid > 0 then RecordRepair(personalPaid, false) end
-        ResetRepairState()
-      else
-        -- Personal repair; delta is what we spent.
-        if delta > 0 then
-          RecordRepair(delta, false)
-        end
-        ResetRepairState()
+      local delta = repair.moneyBefore - GetMoney()
+      if delta > 0 then
+        RecordRepair(delta, "personal")
       end
+      ResetRepairState()
     end
 
     if AR.popupFrame and AR.popupFrame:IsShown() then
@@ -594,9 +488,9 @@ StaticPopupDialogs["ACCOUNTREPAIRED_CONFIRM_DELETE"] = {
       AR.popupFrame:UpdateDisplay()
     end
   end,
-  timeout       = 0,
-  whileDead     = true,
-  hideOnEscape  = true,
+  timeout        = 0,
+  whileDead      = true,
+  hideOnEscape   = true,
   preferredIndex = 3,
 }
 
@@ -634,7 +528,7 @@ SlashCmdList.ACCOUNTREPAIREDDELETE = DeleteCharacter
 local function SendRepairBreakdown(armorType, channel)
   local chars = GetCharactersByArmorType(armorType, AR.currentPeriod)
   if #chars == 0 then return end
-  local header = (L["ARMOR_" .. armorType] or armorType) .. " (" .. GetPeriodLabel(AR.currentPeriod) .. "):"
+  local header = "Account Repaired: " .. (L["ARMOR_" .. armorType] or armorType) .. " (" .. GetPeriodLabel(AR.currentPeriod) .. "):"
   if channel == "NONE" then
     print("|cff00ff00" .. header .. "|r")
     for _, ch in ipairs(chars) do
@@ -680,7 +574,8 @@ local function GetOrCreateChannelPicker()
   title:SetPoint("TOPLEFT",  p, "TOPLEFT",  10, -8)
   title:SetPoint("TOPRIGHT", p, "TOPRIGHT", -10, -8)
   title:SetJustifyH("CENTER")
-  title:SetText("Send to\226\128\166")
+  -- FIX 1: removed trailing em dash
+  title:SetText("Send to")
   title:SetTextColor(0.75, 0.75, 0.75)
 
   local function AddDivider(yOff)
@@ -712,8 +607,6 @@ local function GetOrCreateChannelPicker()
   end
 
   local function HidePicker()
-    p.isGuildShare = nil
-    p.guildList    = nil
     p.pendingArmorType = nil
     p:Hide()
   end
@@ -724,21 +617,7 @@ local function GetOrCreateChannelPicker()
     local cr, cg, cb = chan.color[1], chan.color[2], chan.color[3]
     AddPickerButton(yOff, chan.label, cr, cg, cb, function()
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
-      if p.isGuildShare and p.guildList then
-        local header = "Guild repairs (" .. GetPeriodLabel(AR.currentPeriod) .. "):"
-        if chan.key == "NONE" then
-          print("|cff00ff00" .. header .. "|r")
-          for _, e in ipairs(p.guildList) do
-            print("  " .. e.name .. " - " .. FormatGoldPlain(e.gold))
-          end
-        else
-          local parts = { header }
-          for _, e in ipairs(p.guildList) do
-            parts[#parts + 1] = e.name .. " " .. FormatGoldPlain(e.gold)
-          end
-          SendChatMessage(table.concat(parts, " "), chan.key)
-        end
-      elseif p.pendingArmorType then
+      if p.pendingArmorType then
         SendRepairBreakdown(p.pendingArmorType, chan.key)
       end
       HidePicker()
@@ -762,15 +641,12 @@ local function GetOrCreateChannelPicker()
   return p
 end
 
-local function ShowChannelPicker(anchorRow, isGuild, guildList, armorType)
+local function ShowChannelPicker(anchorRow, armorType)
   local picker = GetOrCreateChannelPicker()
-  picker.isGuildShare    = isGuild
-  picker.guildList       = guildList
   picker.pendingArmorType = armorType
   picker:ClearAllPoints()
   picker:SetPoint("TOPLEFT", anchorRow, "BOTTOMLEFT", 0, -4)
   picker:Show()
-  -- Flip up if off screen
   if picker:GetBottom() and picker:GetBottom() < 0 then
     picker:ClearAllPoints()
     picker:SetPoint("BOTTOMLEFT", anchorRow, "TOPLEFT", 0, 4)
@@ -820,40 +696,20 @@ local function CreateBarRow(parent, width)
   row:SetScript("OnEnter", function(self)
     self.highlight:Show()
     if not self.armorType then return end
-
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    local chars = GetCharactersByArmorType(self.armorType, AR.currentPeriod)
+    if #chars == 0 then GameTooltip:Hide(); return end
+    local col = ARMOR_COLORS[self.armorType] or ARMOR_COLORS.Unknown
     local periodCtx = GetPeriodContextLabel(AR.currentPeriod)
-
-    if self.isGuildRow then
-      local guildTotals = GetGuildUsageTotals(AR.currentPeriod)
-      local list = {}
-      for name, g in pairs(guildTotals) do
-        table.insert(list, { name=name, gold=g })
-      end
-      if #list == 0 then GameTooltip:Hide(); return end
-      table.sort(list, function(a, b) return a.gold > b.gold end)
-      GameTooltip:AddLine(string.format("Guild |cff888888(%s)|r", periodCtx),
-        GUILD_COLOR.r, GUILD_COLOR.g, GUILD_COLOR.b)
-      GameTooltip:AddLine(" ")
-      for _, g in ipairs(list) do
-        GameTooltip:AddDoubleLine(g.name, FormatGoldFull(g.gold),
-          GUILD_COLOR.r, GUILD_COLOR.g, GUILD_COLOR.b, 1, 1, 1)
-      end
-    else
-      local chars = GetCharactersByArmorType(self.armorType, AR.currentPeriod)
-      if #chars == 0 then GameTooltip:Hide(); return end
-      local col = ARMOR_COLORS[self.armorType] or ARMOR_COLORS.Unknown
-      GameTooltip:AddLine(
-        string.format("%s |cff888888(%s)|r", L["ARMOR_" .. self.armorType] or self.armorType, periodCtx),
-        col.r, col.g, col.b)
-      GameTooltip:AddLine(" ")
-      for _, ch in ipairs(chars) do
-        local cc = RAID_CLASS_COLORS[ch.class] or { r=1, g=1, b=1 }
-        GameTooltip:AddDoubleLine(ch.name, FormatGoldFull(ch.gold),
-          cc.r, cc.g, cc.b, 1, 1, 1)
-      end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(
+      string.format("%s |cff888888(%s)|r", L["ARMOR_" .. self.armorType] or self.armorType, periodCtx),
+      col.r, col.g, col.b)
+    GameTooltip:AddLine(" ")
+    for _, ch in ipairs(chars) do
+      local cc = RAID_CLASS_COLORS[ch.class] or { r=1, g=1, b=1 }
+      GameTooltip:AddDoubleLine(ch.name, FormatGoldFull(ch.gold),
+        cc.r, cc.g, cc.b, 1, 1, 1)
     end
-
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine(L["CLICK_TO_SHARE"] or "Click to share in chat",   0.5, 0.5, 0.5)
     GameTooltip:AddLine(L["RCLICK_CHAR_LIST"] or "Right-click for details", 0.5, 0.5, 0.5)
@@ -869,25 +725,10 @@ local function CreateBarRow(parent, width)
     if not self.armorType then return end
     GameTooltip:Hide()
     PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
-
-    if self.isGuildRow then
-      if button == "RightButton" then
-        AR.ShowGuildPanel(false, self)
-      else
-        local guildTotals = GetGuildUsageTotals(AR.currentPeriod)
-        local list = {}
-        for name, g in pairs(guildTotals) do
-          table.insert(list, { name=name, gold=g })
-        end
-        table.sort(list, function(a, b) return a.gold > b.gold end)
-        ShowChannelPicker(self, true, list, nil)
-      end
+    if button == "RightButton" then
+      AR.ShowCharPanel(self.armorType, false, self)
     else
-      if button == "RightButton" then
-        AR.ShowCharPanel(self.armorType, false, self)
-      else
-        ShowChannelPicker(self, false, nil, self.armorType)
-      end
+      ShowChannelPicker(self, self.armorType)
     end
   end)
 
@@ -895,7 +736,7 @@ local function CreateBarRow(parent, width)
 end
 
 --------------------------------------------------
--- Generic list panel factory
+-- Character list panel
 --------------------------------------------------
 local function CreateListPanel(name)
   local p = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
@@ -922,9 +763,7 @@ local function CreateListPanel(name)
   closeBtn:SetPoint("TOPRIGHT", p, "TOPRIGHT", -2, -2)
   closeBtn:SetScript("OnClick", function()
     p:Hide()
-    if p == AR.charPanel then
-      AR.charPanelArmor = nil
-    end
+    if p == AR.charPanel then AR.charPanelArmor = nil end
   end)
 
   local div = p:CreateTexture(nil, "ARTWORK")
@@ -976,9 +815,6 @@ local function CreateListPanel(name)
   return p
 end
 
---------------------------------------------------
--- Character panel
---------------------------------------------------
 local function CreateCharPanel()
   if AR.charPanel then return AR.charPanel end
   local p = CreateListPanel("AccountRepairedCharPanel")
@@ -1047,109 +883,11 @@ function AR.ShowCharPanel(armorType, forceShow, anchorRow)
 end
 
 --------------------------------------------------
--- Guild panel
---------------------------------------------------
-local function CreateGuildPanel()
-  if AR.guildPanel then return AR.guildPanel end
-  local p = CreateListPanel("AccountRepairedGuildPanel")
-
-  for _, row in ipairs(p.rows) do
-    row.trashBtn:SetScript("OnEnter", function()
-      row.bg:SetColorTexture(1, 0.25, 0.25, 0.15)
-      GameTooltip:SetOwner(row.trashBtn, "ANCHOR_RIGHT")
-      GameTooltip:SetText("Remove this guild's repair history", 1, 0.35, 0.35)
-      GameTooltip:Show()
-    end)
-    row.trashBtn:SetScript("OnLeave", function()
-      row.bg:SetColorTexture(1, 1, 1, 0)
-      GameTooltip:Hide()
-    end)
-    row.trashBtn:SetScript("OnClick", function()
-      if not row.guildName then return end
-      local target = row.guildName
-      -- Resolve what the fallback name is right now so we can match it.
-      local fallbackName = GetGuildInfo("player") or L["UNKNOWN"]
-      local targetIsFallback = (target == fallbackName)
-      for _, cd in pairs(AccountRepairedDB) do
-        if type(cd) == "table" and cd.repairs then
-          local i = 1
-          while i <= #cd.repairs do
-            local e = cd.repairs[i]
-            if e.guild then
-              local ename = e.guildName
-              -- An entry matches if its stored name equals the target, OR
-              -- if it is a legacy nil / sentinel entry and target is the
-              -- fallback name (current guild or "Unknown").
-              local isLegacy = (not ename or ename == GUILD_UNKNOWN_KEY)
-              if ename == target or (isLegacy and targetIsFallback) then
-                table.remove(cd.repairs, i)
-              else
-                i = i + 1
-              end
-            else
-              i = i + 1
-            end
-          end
-        end
-      end
-      AR.ShowGuildPanel(true)
-      if AR.popupFrame and AR.popupFrame:IsShown() then
-        AR.popupFrame:UpdateDisplay()
-      end
-    end)
-  end
-
-  AR.guildPanel = p
-  return p
-end
-
-function AR.ShowGuildPanel(forceShow, anchorRow)
-  local p = CreateGuildPanel()
-  if not forceShow and p:IsShown() then p:Hide(); return end
-
-  local guildTotals = GetGuildUsageTotals(AR.currentPeriod)
-  local list = {}
-  for name, g in pairs(guildTotals) do
-    table.insert(list, { name=name, gold=g })
-  end
-  table.sort(list, function(a, b) return a.gold > b.gold end)
-
-  if anchorRow then
-    p:ClearAllPoints()
-    p:SetPoint("TOPLEFT", anchorRow, "TOPRIGHT", 6, 0)
-  elseif not p:IsShown() then
-    p:ClearAllPoints()
-    local anchor = (AR.popupFrame and AR.popupFrame:IsShown()) and AR.popupFrame or UIParent
-    local pt     = AR.popupFrame and AR.popupFrame:IsShown() and "TOPRIGHT" or "CENTER"
-    p:SetPoint("TOPLEFT", anchor, pt, AR.popupFrame and 4 or 0, 0)
-  end
-
-  p.titleText:SetText("Guild")
-  p.titleText:SetTextColor(GUILD_COLOR.r, GUILD_COLOR.g, GUILD_COLOR.b)
-
-  for i, row in ipairs(p.rows) do
-    local e = list[i]
-    if e then
-      row.nameText:SetText(e.name)
-      row.nameText:SetTextColor(GUILD_COLOR.r, GUILD_COLOR.g, GUILD_COLOR.b)
-      row.goldText:SetText(FormatGoldShort(e.gold))
-      row.guildName = e.name
-      row:Show()
-    else
-      row.guildName = nil
-      row:Hide()
-    end
-  end
-  p:SetHeight(CPANEL_HEADER_H + CPANEL_PAD + #list * CPANEL_ROW_H + CPANEL_PAD)
-  p:Show()
-end
-
---------------------------------------------------
 -- Period tab bar
 --------------------------------------------------
 local function CreatePeriodTabs(parent, onSelect)
   local tabs = {}
-  local tabW, tabH, pad = 72, 22, 4
+  local tabW, tabH, pad = 76, 24, 6
   local container = CreateFrame("Frame", nil, parent)
   container:SetSize(#PERIOD_ORDER * (tabW + pad) - pad, tabH)
 
@@ -1161,7 +899,7 @@ local function CreatePeriodTabs(parent, onSelect)
       bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
       edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
       tile=true, tileSize=16, edgeSize=12,
-      insets={ left=3, right=3, top=3, bottom=3 },
+      insets={ left=4, right=4, top=4, bottom=4 },
     })
     tab.label = tab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     tab.label:SetAllPoints()
@@ -1181,7 +919,7 @@ local function CreatePeriodTabs(parent, onSelect)
 
     tab:SetScript("OnClick", function(self)
       AR.currentPeriod = self.period
-      DB.period = self.period
+      AccountRepairedPopupDB.period = self.period
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
       onSelect(self.period)
       for _, t in ipairs(tabs) do t:UpdateState() end
@@ -1194,9 +932,7 @@ local function CreatePeriodTabs(parent, onSelect)
       GameTooltip:Show()
     end)
 
-    tab:SetScript("OnLeave", function()
-      GameTooltip:Hide()
-    end)
+    tab:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     tab:UpdateState()
     tabs[i] = tab
@@ -1256,12 +992,10 @@ local function CreatePopup()
   })
   f:SetBackdropColor(0, 0, 0, 0.55)
 
-  -- ── Title ────────────────────────────────────────────────────────────────
   f.title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
   f.title:SetPoint("TOP", f, "TOP", 0, -12)
   f.title:SetText(L["WINDOW_TITLE"])
 
-  -- ── Close button ─────────────────────────────────────────────────────────
   local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
   closeBtn:SetPoint("TOPRIGHT", -10, -10)
   closeBtn:SetScript("OnClick", function()
@@ -1270,15 +1004,11 @@ local function CreatePopup()
   end)
 
   f:SetScript("OnHide", function()
-    if AR.charPanel  then AR.charPanel:Hide()  end; AR.charPanelArmor = nil
-    if AR.guildPanel then AR.guildPanel:Hide() end
+    if AR.charPanel then AR.charPanel:Hide() end
+    AR.charPanelArmor = nil
   end)
   table.insert(UISpecialFrames, "AccountRepairedPopup")
 
-  -- ── Resize grip ──────────────────────────────────────────────────────────
-  -- We use a simple frame, not a Button, and handle sizing with
-  -- OnMouseDown / OnMouseUp directly on the frame to avoid the re-entrant
-  -- SetSize feedback loop that a Button's OnClick causes.
   local br = CreateFrame("Frame", nil, f)
   br:SetSize(16, 16)
   br:SetPoint("BOTTOMRIGHT", -6, 6)
@@ -1294,7 +1024,6 @@ local function CreatePopup()
   end)
   br:SetScript("OnMouseUp", function()
     f:StopMovingOrSizing()
-    -- Clamp width; height is free.
     DB.width  = math.max(MIN_W, math.min(f:GetWidth(), MAX_W))
     DB.height = math.max(MIN_H, math.min(f:GetHeight(), MAX_H))
     f:SetSize(DB.width, DB.height)
@@ -1302,40 +1031,13 @@ local function CreatePopup()
   end)
   f.resizeGrip = br
 
-  -- OnSizeChanged: only update layout, never call SetSize (avoids feedback loop)
   f:SetScript("OnSizeChanged", function(self, w, h)
     local cw = self.scrollFrame and self.scrollFrame:GetWidth() or (w - 44)
     if self.content then self.content:SetWidth(cw) end
     for _, row in ipairs(AR.popupRows) do row:SetWidth(cw) end
-    if AR.guildRow then AR.guildRow:SetWidth(cw) end
     UpdateScrollBar(self)
   end)
 
-  -- ── Guild usage bar checkbox ──────────────────────────────────────────────
-  local guildCB = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
-  guildCB:SetSize(24, 24)
-  guildCB:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
-  guildCB:SetChecked(DB.showGuildUsageBar ~= false)
-  f.guildCBLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  f.guildCBLabel:SetPoint("LEFT", guildCB, "RIGHT", 2, 0)
-  f.guildCBLabel:SetText(L["INCLUDE_GUILD_REPAIRS"])
-  f.guildCBLabel:SetTextColor(0.8, 0.8, 0.8)
-  guildCB:SetScript("OnClick", function(self)
-    local checked = self:GetChecked()
-    DB.showGuildUsageBar = checked and true or false
-    PlaySound(checked and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF)
-    f:UpdateDisplay()
-  end)
-  guildCB:SetScript("OnEnter", function(self)
-    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-    GameTooltip:AddLine(L["INCLUDE_GUILD_REPAIRS"], 1, 1, 1)
-    GameTooltip:AddLine(L["GUILD_REPAIRS_TIP"], 0.8, 0.8, 0.8, true)
-    GameTooltip:Show()
-  end)
-  guildCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
-  f.guildCB = guildCB
-
-  -- ── Period tabs ───────────────────────────────────────────────────────────
   local tabContainer, tabRefs = CreatePeriodTabs(f, function()
     f:UpdateDisplay()
   end)
@@ -1343,10 +1045,9 @@ local function CreatePopup()
   f.tabs    = tabContainer
   f.tabRefs = tabRefs
 
-  -- ── Current character strip ───────────────────────────────────────────────
   local strip = CreateFrame("Frame", nil, f, "BackdropTemplate")
-  strip:SetPoint("TOPLEFT",  f, "TOPLEFT",  14, -66)
-  strip:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -66)
+  strip:SetPoint("TOPLEFT",  f, "TOPLEFT",  14, POPUP_STRIP_Y)
+  strip:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, POPUP_STRIP_Y)
   strip:SetHeight(36)
   strip:SetBackdrop({
     bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -1366,9 +1067,8 @@ local function CreatePopup()
   strip.statsText:SetTextColor(0.85, 0.85, 0.85)
   f.charStrip = strip
 
-  -- ── Scroll frame ──────────────────────────────────────────────────────────
   local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  sf:SetPoint("TOPLEFT",     f, "TOPLEFT",     14, -110)
+  sf:SetPoint("TOPLEFT",     f, "TOPLEFT",     14, POPUP_SF_Y)
   sf:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -30, 50)
   sf:EnableMouseWheel(true)
   sf:SetScript("OnMouseWheel", function(self, delta)
@@ -1383,12 +1083,10 @@ local function CreatePopup()
   f.scrollFrame = sf
   f.content     = content
 
-  -- ── Total label ───────────────────────────────────────────────────────────
   f.totalRow = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
   f.totalRow:SetPoint("BOTTOMLEFT", 15, 18)
   f.totalRow:SetTextColor(1, 1, 1)
 
-  -- ── Account Played companion button ───────────────────────────────────────
   local apBtn = CreateFrame("Button", nil, f, "BackdropTemplate")
   apBtn:SetSize(120, 20)
   apBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -15, 16)
@@ -1407,8 +1105,32 @@ local function CreatePopup()
     self:SetBackdropBorderColor(0.6, 0.85, 1.0, 1.0)
     self:SetBackdropColor(0.02, 0.08, 0.18, 0.95)
     GameTooltip:SetOwner(self, "ANCHOR_TOP")
-    GameTooltip:AddLine("Account Played", 0.6, 0.85, 1.0)
-    GameTooltip:AddLine("Switch to account played statistics", 0.8, 0.8, 0.8)
+    GameTooltip:AddLine("Account Played", 0.4, 0.70, 1.0)
+    GameTooltip:AddLine("Switch to account played statistics", 0.65, 0.65, 0.65)
+
+    -- AccountPlayed-1.0 API: total days + top 3 chars by playtime
+    -- Lib Reference: https://github.com/Jeremy-Gstein/AccountPlayed/blob/main/API.lua (MIT Lisence)
+    local AP = LibStub and LibStub("AccountPlayed-1.0", true)
+    if AP then
+      local apTotal = AP:GetAccountTotal()
+      local apChars = AP:GetAllCharacters()
+      local totalDays = math.floor(apTotal / 86400 + 0.5)
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddDoubleLine(
+        string.format("|cffAAAAAATotal:|r %dd", totalDays),
+        string.format("|cffAAAAAA%d chars tracked|r", #apChars),
+        1, 1, 1, 0.65, 0.65, 0.65)
+      for i = 1, math.min(3, #apChars) do
+        local ch = apChars[i]
+        local cc = RAID_CLASS_COLORS[ch.class] or { r=1, g=1, b=1 }
+        GameTooltip:AddDoubleLine(
+          string.format("|cff%02x%02x%02x%s|r",
+            cc.r * 255, cc.g * 255, cc.b * 255, ch.name),
+          AP:FormatTime(ch.time),
+          1, 1, 1, 0.85, 0.85, 0.85)
+      end
+    end
+
     GameTooltip:Show()
   end)
   apBtn:SetScript("OnLeave", function(self)
@@ -1422,7 +1144,6 @@ local function CreatePopup()
     if AccountPlayed and AccountPlayed.ToggleClassWindow then
       AccountPlayed.ToggleClassWindow()
     end
-    -- Strip injection fires via hook; nudge a refresh in case AP was already open
     C_Timer.After(0.05, function()
       if AR.RefreshAPStrip then AR.RefreshAPStrip() end
     end)
@@ -1430,8 +1151,6 @@ local function CreatePopup()
   apBtn:Hide()
   f.apBtn = apBtn
 
-  -- ── Armor bar rows (pre-allocated, shown/hidden by UpdateDisplay) ─────────
-  -- +1 extra slot for the guild row, which is positioned after visible armor rows
   for i = 1, #ARMOR_TYPE_NAMES do
     local row = CreateBarRow(content, sf:GetWidth())
     row:SetPoint("TOPLEFT", 0, -(i - 1) * BAR_ROW_H)
@@ -1439,15 +1158,7 @@ local function CreatePopup()
     AR.popupRows[i] = row
   end
 
-  -- Guild row is anchored dynamically in UpdateDisplay, not at a fixed offset
-  local guildRow = CreateBarRow(content, sf:GetWidth())
-  guildRow.isGuildRow = true
-  guildRow:Hide()
-  AR.guildRow = guildRow
-
-  -- ── UpdateDisplay ─────────────────────────────────────────────────────────
   f.UpdateDisplay = function(self)
-    -- Account Played companion button visibility
     if AccountPlayed and AccountPlayed.ToggleClassWindow then
       self.apBtn:Show()
     else
@@ -1455,9 +1166,7 @@ local function CreatePopup()
     end
 
     for _, tab in ipairs(self.tabRefs) do tab:UpdateState() end
-    self.guildCB:SetChecked(DB.showGuildUsageBar ~= false)
 
-    -- Current character strip
     local realm, name = GetCharInfo()
     local _, classFile = UnitClass("player")
     local cc = (classFile and RAID_CLASS_COLORS[classFile]) or { r=1, g=1, b=1 }
@@ -1473,16 +1182,14 @@ local function CreatePopup()
     end
     self.charStrip.statsText:SetText(string.format(
       "%s: %s  %s: %s  %s: %s  %s: %s",
-      PL("day"),   FormatGoldShort(stats.day),
-      PL("week"),  FormatGoldShort(stats.week),
-      PL("month"), FormatGoldShort(stats.month),
-      PL("all"),   FormatGoldShort(stats.all)))
+      PL("day"),   FormatGoldRounded(stats.day),
+      PL("week"),  FormatGoldRounded(stats.week),
+      PL("month"), FormatGoldRounded(stats.month),
+      PL("all"),   FormatGoldRounded(stats.all)))
 
-    -- Armor type totals
     local totals, acct = GetArmorTypeTotals(AR.currentPeriod)
 
     if acct == 0 then
-      -- No personal data
       AR.popupRows[1].labelText:SetText("No Repairs Yet")
       AR.popupRows[1].bar:SetValue(0)
       AR.popupRows[1].pctText:SetText("")
@@ -1490,14 +1197,12 @@ local function CreatePopup()
       AR.popupRows[1].armorType = nil
       AR.popupRows[1]:Show()
       for i = 2, #AR.popupRows do AR.popupRows[i]:Hide() end
-      if AR.guildRow then AR.guildRow:Hide() end
       self.content:SetHeight(BAR_ROW_H)
       self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(0))
       UpdateScrollBar(self)
       return
     end
 
-    -- Build sorted armor list
     local sorted = {}
     for _, at in ipairs(ARMOR_TYPE_NAMES) do
       if (totals[at] or 0) > 0 then
@@ -1507,7 +1212,6 @@ local function CreatePopup()
     table.sort(sorted, function(a, b) return a.gold > b.gold end)
     local top = sorted[1].gold
 
-    -- Position and populate armor rows
     for i, row in ipairs(AR.popupRows) do
       local e = sorted[i]
       if e then
@@ -1518,7 +1222,7 @@ local function CreatePopup()
         row.bar:SetValue(e.gold / top)
         row.bar:SetStatusBarColor(col.r, col.g, col.b)
         row.pctText:SetText(string.format("%.1f%%", e.gold / acct * 100))
-        row.goldText:SetText("- " .. FormatGoldShort(e.gold))
+        row.goldText:SetText("- " .. FormatGoldRounded(e.gold))
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", 0, -(i - 1) * BAR_ROW_H)
         row:Show()
@@ -1528,41 +1232,12 @@ local function CreatePopup()
       end
     end
 
-    -- Guild usage bar — positioned immediately after last visible armor row
-    local numShown   = #sorted
-    local guildTotals = GetGuildUsageTotals(AR.currentPeriod)
-    local guildAcct  = 0
-    for _, v in pairs(guildTotals) do guildAcct = guildAcct + v end
-
-    if DB.showGuildUsageBar ~= false and guildAcct > 0 and AR.guildRow then
-      local row = AR.guildRow
-      row.armorType = "Guild"
-      row.labelText:SetText("Guild")
-      row.labelText:SetTextColor(GUILD_COLOR.r, GUILD_COLOR.g, GUILD_COLOR.b)
-      row.bar:SetValue(1)
-      row.bar:SetStatusBarColor(GUILD_COLOR.r, GUILD_COLOR.g, GUILD_COLOR.b)
-      local denom = acct + guildAcct
-      row.pctText:SetText(string.format("%.1f%%", denom > 0 and (guildAcct / denom * 100) or 0))
-      row.goldText:SetText(FormatGoldShort(guildAcct))
-      -- Anchor directly below the last armor row, no extra gap
-      row:ClearAllPoints()
-      row:SetPoint("TOPLEFT", 0, -(numShown * BAR_ROW_H))
-      row:Show()
-      self.content:SetHeight(numShown * BAR_ROW_H + BAR_ROW_H)
-    else
-      if AR.guildRow then AR.guildRow:Hide() end
-      self.content:SetHeight(numShown * BAR_ROW_H)
-    end
-
+    self.content:SetHeight(#sorted * BAR_ROW_H)
     UpdateScrollBar(self)
     self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(acct))
 
-    -- Refresh any open side panels
     if AR.charPanel and AR.charPanel:IsShown() and AR.charPanelArmor then
       AR.ShowCharPanel(AR.charPanelArmor, true)
-    end
-    if AR.guildPanel and AR.guildPanel:IsShown() then
-      AR.ShowGuildPanel(true)
     end
   end
 
@@ -1595,27 +1270,11 @@ end
 
 --------------------------------------------------
 -- Account Played companion injection
--- Replaces the old button with an inline repair-stat strip that sits
--- inside the AccountPlayed bottom bar, styled to match its existing
--- "Today / Week / Month / AllTime" layout.
 --------------------------------------------------
 local _apHooked = false
 
--- Called any time the AP frame becomes visible or our data changes so the
--- strip text stays current.
-local function RefreshAPStrip()
-  local apf = _G["AccountPlayedPopup"]
-  if not (apf and apf._arStrip) then return end
-
-  local stats = GetCurrentCharAllPeriods()
-  -- Label: clickable orange "⚒ Repairs" prefix
-  -- Stats: Today / Week / Month / All  (same cadence as Account Played)
-  apf._arStrip.statsText:SetText(string.format(
-    "Today: %s  Week: %s  Month: %s",
-    FormatGoldShort(stats.day),
-    FormatGoldShort(stats.week),
-    FormatGoldShort(stats.month)))
-end
+local function RefreshAPStrip() end
+AR.RefreshAPStrip = RefreshAPStrip
 
 AR.TryInjectAccountPlayedButton = function()
   if not (AccountPlayed and AccountPlayed.ToggleClassWindow) then return end
@@ -1626,64 +1285,67 @@ AR.TryInjectAccountPlayedButton = function()
     local apf = _G["AccountPlayedPopup"]
     if not apf or apf._arStrip then return end
 
-    -- Container sits in the bottom bar. BOTTOMLEFT/BOTTOMRIGHT anchors keep
-    -- it pinned to the bar regardless of window height.
-    -- Left inset clears "TOTAL: 2y 62d" (~160px); right inset clears "Years ✓" (~72px).
-    local strip = CreateFrame("Frame", nil, apf)
-    strip:SetHeight(16)
-    strip:SetPoint("BOTTOMLEFT",  apf, "BOTTOMLEFT",  160, 8)
-    strip:SetPoint("BOTTOMRIGHT", apf, "BOTTOMRIGHT", -72, 8)
-
-    -- "Repairs" — clickable label with border, opens our window
-    local prefixBtn = CreateFrame("Button", nil, strip, "BackdropTemplate")
-    prefixBtn:SetSize(100, 18)
-    prefixBtn:SetPoint("LEFT", strip, "LEFT", 0, 0)
-    prefixBtn:SetBackdrop({
+    -- FIX 2: centered horizontally, raised to avoid clipping the frame border
+    local btn = CreateFrame("Button", nil, apf, "BackdropTemplate")
+    btn:SetSize(128, 20)
+    btn:SetPoint("BOTTOM", apf, "BOTTOM", 0, 14)
+    btn:SetBackdrop({
       bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
       edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
       tile=true, tileSize=16, edgeSize=10,
       insets={ left=3, right=3, top=3, bottom=3 },
     })
-    prefixBtn:SetBackdropColor(0.05, 0.05, 0.05, 0.85)
-    prefixBtn:SetBackdropBorderColor(1.0, 0.55, 0.1, 0.9)
-    local prefixLbl = prefixBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    prefixLbl:SetAllPoints()
-    prefixLbl:SetJustifyH("CENTER")
-    prefixLbl:SetWordWrap(false)
-    prefixLbl:SetText("|cffFFAA33Account Repaired|r")
+    btn:SetBackdropColor(0.06, 0.04, 0.01, 0.90)
+    btn:SetBackdropBorderColor(1.0, 0.55, 0.1, 0.85)
 
-    prefixBtn:SetScript("OnEnter", function()
-      prefixBtn:SetBackdropBorderColor(1.0, 0.75, 0.3, 1.0)
-      prefixBtn:SetBackdropColor(0.12, 0.07, 0.01, 0.95)
-      GameTooltip:SetOwner(prefixBtn, "ANCHOR_TOP")
+    local lbl = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    lbl:SetAllPoints()
+    lbl:SetJustifyH("CENTER")
+    lbl:SetWordWrap(false)
+    lbl:SetText("|cffFFAA33Account Repaired|r")
+
+    -- FIX 4: compact tooltip â€” Day/Week/Month on one line, All Time + Account on second.
+    -- AccountPlayed-1.0 API data shown below if the lib is available (AP installed).
+    btn:SetScript("OnEnter", function(self)
+      self:SetBackdropBorderColor(1.0, 0.75, 0.3, 1.0)
+      self:SetBackdropColor(0.14, 0.08, 0.01, 0.95)
+
+      local stats = GetCurrentCharAllPeriods()
+      local _, acctTotal = GetArmorTypeTotals("all")
+
+      GameTooltip:SetOwner(self, "ANCHOR_TOP")
       GameTooltip:AddLine("Account Repaired", 1.0, 0.67, 0.2)
-      GameTooltip:AddLine("Click to open repair statistics", 0.8, 0.8, 0.8)
+      GameTooltip:AddLine("Repair cost tracker - click to open", 0.65, 0.65, 0.65)
+      GameTooltip:AddLine(" ")
+
+      -- Account total first, then the per-period breakdown
+      -- GameTooltip:AddLine(string.format(
+      --   "|cffAAAAAAAccount:|r %s  |cffAAAAAAAll Time:|r %s",
+      --   FormatGoldRounded(acctTotal),
+      --   FormatGoldRounded(stats.all)), 1, 1, 1)
+      GameTooltip:AddLine(string.format(
+        "|cffAAAAAAToday:|r %s  |cffAAAAAAWeek:|r %s  |cffAAAAAAMonth:|r %s",
+        FormatGoldRounded(stats.day),
+        FormatGoldRounded(stats.week),
+        FormatGoldRounded(stats.month)), 1, 1, 1)
+
       GameTooltip:Show()
     end)
-    prefixBtn:SetScript("OnLeave", function()
-      prefixBtn:SetBackdropBorderColor(1.0, 0.55, 0.1, 0.9)
-      prefixBtn:SetBackdropColor(0.05, 0.05, 0.05, 0.85)
+
+    btn:SetScript("OnLeave", function(self)
+      self:SetBackdropBorderColor(1.0, 0.55, 0.1, 0.85)
+      self:SetBackdropColor(0.06, 0.04, 0.01, 0.90)
       GameTooltip:Hide()
     end)
-    prefixBtn:SetScript("OnClick", function()
+
+    -- FIX 3: close Account Played window when opening Account Repaired
+    btn:SetScript("OnClick", function()
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
-      if AccountPlayed and AccountPlayed.ToggleClassWindow then
-        AccountPlayed.ToggleClassWindow()
-      end
+      apf:Hide()
       AR.ToggleWindow()
     end)
 
-    -- Stats text — fills the rest of the strip to the right of the prefix
-    local statsText = strip:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    statsText:SetPoint("LEFT",  prefixBtn, "RIGHT", 6, 0)
-    statsText:SetPoint("RIGHT", strip,     "RIGHT", 0, 0)
-    statsText:SetJustifyH("LEFT")
-    statsText:SetWordWrap(false)
-    statsText:SetTextColor(0.85, 0.85, 0.85)
-    strip.statsText = statsText
-
-    apf._arStrip = strip
-    RefreshAPStrip()
+    apf._arStrip = btn
   end
 
   hooksecurefunc(AccountPlayed, "ToggleClassWindow", function()
@@ -1695,12 +1357,6 @@ AR.TryInjectAccountPlayedButton = function()
   InjectStrip()
 end
 
--- Keep the strip current whenever our repair data updates.
--- Hooked at the bottom of RecordRepair via the popupFrame update, but we
--- also need to refresh when the AP frame is opened without a new repair.
--- We expose this so the PLAYER_LOGIN timer can call it too.
-AR.RefreshAPStrip = RefreshAPStrip
-
 --------------------------------------------------
 -- Debug command
 --------------------------------------------------
@@ -1709,15 +1365,14 @@ SlashCmdList.ACCOUNTREPAIREDDEBUG = function()
   print("|cffff0000" .. L["DEBUG_HEADER"] .. "|r")
   for charKey, data in pairs(AccountRepairedDB) do
     if type(data) == "table" then
-      local personal, guild = 0, 0
+      local total = 0
       for _, e in ipairs(data.repairs or {}) do
-        if e.guild then guild = guild + (e.g or 0)
-        else personal = personal + (e.g or 0) end
+        total = total + (e.g or 0)
       end
       print(string.format(
-        " |cffffff00- %s [%s/%s] : %s personal / %s guild (%d repairs)|r",
+        " |cffffff00- %s [%s/%s] : %s (%d repairs)|r",
         charKey, data.class or "?", data.armorType or "?",
-        FormatGoldFull(personal), FormatGoldFull(guild), #(data.repairs or {})))
+        FormatGoldFull(total), #(data.repairs or {})))
     end
   end
 end
