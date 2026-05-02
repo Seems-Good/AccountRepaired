@@ -14,21 +14,29 @@ AccountRepairedDB      = AccountRepairedDB or {}
 AccountRepairedPopupDB = AccountRepairedPopupDB or {}
 local DB
 
--- need to be defined before InitDB
-local MIN_W, MIN_H = 440, 190
-local MAX_W, MAX_H = 680, 260
+local MIN_W = 440
+local MAX_W = 680
+
+-- Fixed window height — not saved, not resizable vertically
+local FIXED_H = 260
 
 local function InitDB()
     AccountRepairedDB      = AccountRepairedDB      or {}
     AccountRepairedPopupDB = AccountRepairedPopupDB or {}
     DB = AccountRepairedPopupDB
+
+    -- Migrate: clear any previously saved height
+    DB.height = nil
+
     if DB.width  == nil then DB.width  = 540      end
-    if DB.height == nil then DB.height = 260      end
     if DB.point  == nil then DB.point  = "CENTER" end
     if DB.x      == nil then DB.x      = 0        end
     if DB.y      == nil then DB.y      = 0        end
     if DB.period == nil then DB.period = "all"    end
-    if DB.height > MAX_H then DB.height = MAX_H   end
+
+    -- Clamp saved width to valid range
+    DB.width = math.max(MIN_W, math.min(DB.width, MAX_W))
+
     AR.currentPeriod = DB.period
 end
 
@@ -36,12 +44,6 @@ end
 -- Constants
 --------------------------------------------------
 local DATA_RETENTION_SECONDS = 365 * 2 * 86400
-
---local MIN_W, MIN_H = 440, 190
---local MAX_W, MAX_H = 680, 260
-
--- Clamp any previously-saved height to the new tighter ceiling
--- if AccountRepairedPopupDB.height > MAX_H then AccountRepairedPopupDB.height = MAX_H end
 
 local PERIOD_SECONDS = { day=86400, week=604800, month=2592000, all=0 }
 local PERIOD_ORDER   = { "day", "week", "month", "all" }
@@ -73,8 +75,8 @@ local CPANEL_HEADER_H = 28
 local CPANEL_PAD      = 6
 local BAR_ROW_H       = 26
 
-local POPUP_STRIP_Y  = -68
-local POPUP_SF_Y     = -112
+local POPUP_STRIP_Y = -68
+local POPUP_BARS_Y  = -112
 
 --------------------------------------------------
 -- State
@@ -525,23 +527,40 @@ SlashCmdList.ACCOUNTREPAIREDDELETE = DeleteCharacter
 --------------------------------------------------
 -- Chat sharing
 --------------------------------------------------
+
+-- Returns the trailing phrase used in shared messages, e.g. "in Last 7 Days"
+local function GetPeriodTailLabel(period)
+  if period == "day"   then return "Today" end
+  if period == "week"  then return "in Last 7 Days" end
+  if period == "month" then return "in Last 30 Days" end
+  return "Total Repair Bill"   -- "all"
+end
+
+-- New format (one line per character):
+--   chat : Account Repaired: Name (ArmorType) Xg Xs Xc in Last 7 Days
+--   print: Account Repaired: Name (ArmorType) Xg Xs Xc in Last 7 Days  (with class colour on name)
 local function SendRepairBreakdown(armorType, channel)
   local chars = GetCharactersByArmorType(armorType, AR.currentPeriod)
   if #chars == 0 then return end
-  local header = "Account Repaired: " .. (L["ARMOR_" .. armorType] or armorType) .. " (" .. GetPeriodLabel(AR.currentPeriod) .. "):"
+
+  local armorLabel = L["ARMOR_" .. armorType] or armorType
+  local tail       = GetPeriodTailLabel(AR.currentPeriod)
+
   if channel == "NONE" then
-    print("|cff00ff00" .. header .. "|r")
     for _, ch in ipairs(chars) do
       local cc = RAID_CLASS_COLORS[ch.class] or { r=1, g=1, b=1 }
-      print(string.format(" |cff%02x%02x%02x%s|r - %s",
-        cc.r * 255, cc.g * 255, cc.b * 255, ch.name, FormatGoldFull(ch.gold)))
+      print(string.format(
+        "|cffAAAAAAAAccount Repaired:|r |cff%02x%02x%02x%s|r |cffAAAAAA(%s)|r [%s] %s",
+        cc.r * 255, cc.g * 255, cc.b * 255,
+        ch.name, armorLabel, FormatGoldFull(ch.gold), tail))
     end
   else
-    local parts = { header }
     for _, ch in ipairs(chars) do
-      parts[#parts + 1] = ch.name .. " " .. FormatGoldPlain(ch.gold)
+      SendChatMessage(string.format(
+        "Account Repaired: %s (%s): %s %s",
+        ch.name, armorLabel, FormatGoldPlain(ch.gold), tail),
+        channel)
     end
-    SendChatMessage(table.concat(parts, " "), channel)
   end
 end
 
@@ -574,7 +593,6 @@ local function GetOrCreateChannelPicker()
   title:SetPoint("TOPLEFT",  p, "TOPLEFT",  10, -8)
   title:SetPoint("TOPRIGHT", p, "TOPRIGHT", -10, -8)
   title:SetJustifyH("CENTER")
-  -- FIX 1: removed trailing em dash
   title:SetText("Send to")
   title:SetTextColor(0.75, 0.75, 0.75)
 
@@ -942,28 +960,13 @@ local function CreatePeriodTabs(parent, onSelect)
 end
 
 --------------------------------------------------
--- Scroll bar helper
---------------------------------------------------
-local function UpdateScrollBar(frame)
-  local sf = frame.scrollFrame
-  local sb = sf and (sf.ScrollBar or sf.scrollBar)
-  if not sb then return end
-  if sf:GetVerticalScrollRange() > 0 then
-    sb:Show()
-  else
-    sb:Hide()
-    sf:SetVerticalScroll(0)
-  end
-end
-
---------------------------------------------------
 -- Main popup window
 --------------------------------------------------
 local function CreatePopup()
   if AR.popupFrame then return AR.popupFrame end
 
   local f = CreateFrame("Frame", "AccountRepairedPopup", UIParent, "BackdropTemplate")
-  f:SetSize(DB.width, DB.height)
+  f:SetSize(DB.width, FIXED_H)
   f:SetPoint(DB.point, UIParent, DB.point, DB.x, DB.y)
   f:SetFrameStrata("DIALOG")
   f:SetFrameLevel(100)
@@ -977,12 +980,13 @@ local function CreatePopup()
     local pt, _, _, x, y = self:GetPoint()
     DB.point = pt; DB.x = x; DB.y = y
   end)
+  -- Width-only resizing
   f:SetResizable(true)
   if f.SetResizeBounds then
-    f:SetResizeBounds(MIN_W, MIN_H, MAX_W, MAX_H)
+    f:SetResizeBounds(MIN_W, FIXED_H, MAX_W, FIXED_H)
   elseif f.SetMinResize then
-    f:SetMinResize(MIN_W, MIN_H)
-    f:SetMaxResize(MAX_W, MAX_H)
+    f:SetMinResize(MIN_W, FIXED_H)
+    f:SetMaxResize(MAX_W, FIXED_H)
   end
   f:SetBackdrop({
     bgFile   = "Interface\\ChatFrame\\ChatFrameBackground",
@@ -1009,6 +1013,7 @@ local function CreatePopup()
   end)
   table.insert(UISpecialFrames, "AccountRepairedPopup")
 
+  -- Right-edge drag grip for width-only resizing
   local br = CreateFrame("Frame", nil, f)
   br:SetSize(16, 16)
   br:SetPoint("BOTTOMRIGHT", -6, 6)
@@ -1020,22 +1025,25 @@ local function CreatePopup()
   brHiTex:SetAllPoints()
   brHiTex:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
   br:SetScript("OnMouseDown", function(self, btn)
-    if btn == "LeftButton" then f:StartSizing("BOTTOMRIGHT") end
+    if btn == "LeftButton" then f:StartSizing("RIGHT") end
   end)
   br:SetScript("OnMouseUp", function()
     f:StopMovingOrSizing()
-    DB.width  = math.max(MIN_W, math.min(f:GetWidth(), MAX_W))
-    DB.height = math.max(MIN_H, math.min(f:GetHeight(), MAX_H))
-    f:SetSize(DB.width, DB.height)
-    UpdateScrollBar(f)
+    -- Clamp width, restore fixed height
+    DB.width = math.max(MIN_W, math.min(f:GetWidth(), MAX_W))
+    f:SetSize(DB.width, FIXED_H)
+    -- Re-layout bar rows to match new content width
+    local cw = f.content:GetWidth()
+    for _, row in ipairs(AR.popupRows) do row:SetWidth(cw) end
   end)
   f.resizeGrip = br
 
+  -- Width changes update bar row widths; height is always clamped back to FIXED_H
   f:SetScript("OnSizeChanged", function(self, w, h)
-    local cw = self.scrollFrame and self.scrollFrame:GetWidth() or (w - 44)
+    if h ~= FIXED_H then self:SetHeight(FIXED_H) end
+    local cw = w - 44
     if self.content then self.content:SetWidth(cw) end
     for _, row in ipairs(AR.popupRows) do row:SetWidth(cw) end
-    UpdateScrollBar(self)
   end)
 
   local tabContainer, tabRefs = CreatePeriodTabs(f, function()
@@ -1045,6 +1053,7 @@ local function CreatePopup()
   f.tabs    = tabContainer
   f.tabRefs = tabRefs
 
+  -- Current-character strip
   local strip = CreateFrame("Frame", nil, f, "BackdropTemplate")
   strip:SetPoint("TOPLEFT",  f, "TOPLEFT",  14, POPUP_STRIP_Y)
   strip:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, POPUP_STRIP_Y)
@@ -1067,26 +1076,18 @@ local function CreatePopup()
   strip.statsText:SetTextColor(0.85, 0.85, 0.85)
   f.charStrip = strip
 
-  local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  sf:SetPoint("TOPLEFT",     f, "TOPLEFT",     14, POPUP_SF_Y)
-  sf:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -30, 50)
-  sf:EnableMouseWheel(true)
-  sf:SetScript("OnMouseWheel", function(self, delta)
-    local new = math.max(0, math.min(
-      self:GetVerticalScroll() - delta * 20,
-      self:GetVerticalScrollRange()))
-    self:SetVerticalScroll(new)
-  end)
-  local content = CreateFrame("Frame", nil, sf)
-  content:SetSize(1, 1)
-  sf:SetScrollChild(content)
-  f.scrollFrame = sf
-  f.content     = content
+  -- Plain content frame (no scroll frame)
+  local content = CreateFrame("Frame", nil, f)
+  content:SetPoint("TOPLEFT",     f, "TOPLEFT",     14, POPUP_BARS_Y)
+  content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 50)
+  f.content = content
 
+  -- Total label
   f.totalRow = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
   f.totalRow:SetPoint("BOTTOMLEFT", 15, 18)
   f.totalRow:SetTextColor(1, 1, 1)
 
+  -- Account Played companion button
   local apBtn = CreateFrame("Button", nil, f, "BackdropTemplate")
   apBtn:SetSize(120, 20)
   apBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -15, 16)
@@ -1108,8 +1109,6 @@ local function CreatePopup()
     GameTooltip:AddLine("Account Played", 0.4, 0.70, 1.0)
     GameTooltip:AddLine("Switch to account played statistics", 0.65, 0.65, 0.65)
 
-    -- AccountPlayed-1.0 API: total days + top 3 chars by playtime
-    -- Lib Reference: https://github.com/Jeremy-Gstein/AccountPlayed/blob/main/API.lua (MIT Lisence)
     local AP = LibStub and LibStub("AccountPlayed-1.0", true)
     if AP then
       local apTotal = AP:GetAccountTotal()
@@ -1151,8 +1150,9 @@ local function CreatePopup()
   apBtn:Hide()
   f.apBtn = apBtn
 
+  -- Pre-create bar rows parented directly to content (no scroll child)
   for i = 1, #ARMOR_TYPE_NAMES do
-    local row = CreateBarRow(content, sf:GetWidth())
+    local row = CreateBarRow(content, content:GetWidth())
     row:SetPoint("TOPLEFT", 0, -(i - 1) * BAR_ROW_H)
     row:Hide()
     AR.popupRows[i] = row
@@ -1197,9 +1197,7 @@ local function CreatePopup()
       AR.popupRows[1].armorType = nil
       AR.popupRows[1]:Show()
       for i = 2, #AR.popupRows do AR.popupRows[i]:Hide() end
-      self.content:SetHeight(BAR_ROW_H)
       self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(0))
-      UpdateScrollBar(self)
       return
     end
 
@@ -1232,8 +1230,6 @@ local function CreatePopup()
       end
     end
 
-    self.content:SetHeight(#sorted * BAR_ROW_H)
-    UpdateScrollBar(self)
     self.totalRow:SetText(L["TOTAL"] .. FormatGoldFull(acct))
 
     if AR.charPanel and AR.charPanel:IsShown() and AR.charPanelArmor then
@@ -1250,7 +1246,7 @@ local function UpdatePopup()
   local f = CreatePopup()
   f:ClearAllPoints()
   f:SetPoint(DB.point, UIParent, DB.point, DB.x, DB.y)
-  f:SetSize(DB.width, DB.height)
+  f:SetSize(DB.width, FIXED_H)
   f:UpdateDisplay()
   f:Show()
 end
@@ -1285,7 +1281,6 @@ AR.TryInjectAccountPlayedButton = function()
     local apf = _G["AccountPlayedPopup"]
     if not apf or apf._arStrip then return end
 
-    -- FIX 2: centered horizontally, raised to avoid clipping the frame border
     local btn = CreateFrame("Button", nil, apf, "BackdropTemplate")
     btn:SetSize(128, 20)
     btn:SetPoint("BOTTOM", apf, "BOTTOM", 0, 14)
@@ -1304,8 +1299,6 @@ AR.TryInjectAccountPlayedButton = function()
     lbl:SetWordWrap(false)
     lbl:SetText("|cffFFAA33Account Repaired|r")
 
-    -- FIX 4: compact tooltip â€” Day/Week/Month on one line, All Time + Account on second.
-    -- AccountPlayed-1.0 API data shown below if the lib is available (AP installed).
     btn:SetScript("OnEnter", function(self)
       self:SetBackdropBorderColor(1.0, 0.75, 0.3, 1.0)
       self:SetBackdropColor(0.14, 0.08, 0.01, 0.95)
@@ -1317,12 +1310,6 @@ AR.TryInjectAccountPlayedButton = function()
       GameTooltip:AddLine("Account Repaired", 1.0, 0.67, 0.2)
       GameTooltip:AddLine("Repair cost tracker - click to open", 0.65, 0.65, 0.65)
       GameTooltip:AddLine(" ")
-
-      -- Account total first, then the per-period breakdown
-      -- GameTooltip:AddLine(string.format(
-      --   "|cffAAAAAAAccount:|r %s  |cffAAAAAAAll Time:|r %s",
-      --   FormatGoldRounded(acctTotal),
-      --   FormatGoldRounded(stats.all)), 1, 1, 1)
       GameTooltip:AddLine(string.format(
         "|cffAAAAAAToday:|r %s  |cffAAAAAAWeek:|r %s  |cffAAAAAAMonth:|r %s",
         FormatGoldRounded(stats.day),
@@ -1338,7 +1325,6 @@ AR.TryInjectAccountPlayedButton = function()
       GameTooltip:Hide()
     end)
 
-    -- FIX 3: close Account Played window when opening Account Repaired
     btn:SetScript("OnClick", function()
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
       apf:Hide()
