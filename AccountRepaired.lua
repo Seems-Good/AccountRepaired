@@ -536,6 +536,24 @@ local function GetPeriodTailLabel(period)
   return "Total Repair Bill"   -- "all"
 end
 
+-- Shares the account-wide total for a specific period to a channel.
+-- Used when right-clicking a period tab button.
+local function SendAccountTotal(period, channel)
+  local _, acct = GetArmorTypeTotals(period)
+  local tail    = GetPeriodTailLabel(period)
+
+  if channel == "NONE" then
+    print(string.format(
+      "|cffAAAAAAAAccount Repaired:|r [Account Total] %s %s",
+      FormatGoldFull(acct), tail))
+  else
+    SendChatMessage(string.format(
+      "Account Repaired: [Account Total] %s %s",
+      FormatGoldPlain(acct), tail),
+      channel)
+  end
+end
+
 -- New format (one line per character):
 --   chat : Account Repaired: Name (ArmorType) Xg Xs Xc in Last 7 Days
 --   print: Account Repaired: Name (ArmorType) Xg Xs Xc in Last 7 Days  (with class colour on name)
@@ -605,6 +623,14 @@ local function GetOrCreateChannelPicker()
   end
   AddDivider(-(HEADER_H - 2))
 
+  -- HidePicker clears both pending fields so a stale value from one code path
+  -- never accidentally fires in the other on the next open.
+  local function HidePicker()
+    p.pendingArmorType = nil
+    p.pendingPeriod    = nil
+    p:Hide()
+  end
+
   local function AddPickerButton(yOff, label, r, g, b, onClick)
     local btn = CreateFrame("Button", nil, p)
     btn:SetHeight(BTN_H)
@@ -624,18 +650,17 @@ local function GetOrCreateChannelPicker()
     return btn
   end
 
-  local function HidePicker()
-    p.pendingArmorType = nil
-    p:Hide()
-  end
-
   for i, chan in ipairs(CHAT_CHANNELS) do
     local yOff = -(HEADER_H + PAD + (i - 1) * BTN_H)
     if chan.key == "NONE" then AddDivider(yOff + 1) end
     local cr, cg, cb = chan.color[1], chan.color[2], chan.color[3]
+    -- Each button checks pendingPeriod first (tab right-click path), then
+    -- falls back to pendingArmorType (bar row left-click path).
     AddPickerButton(yOff, chan.label, cr, cg, cb, function()
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
-      if p.pendingArmorType then
+      if p.pendingPeriod then
+        SendAccountTotal(p.pendingPeriod, chan.key)
+      elseif p.pendingArmorType then
         SendRepairBreakdown(p.pendingArmorType, chan.key)
       end
       HidePicker()
@@ -659,9 +684,13 @@ local function GetOrCreateChannelPicker()
   return p
 end
 
-local function ShowChannelPicker(anchorRow, armorType)
+-- anchorRow  : the frame to anchor the picker below (bar row or period tab)
+-- armorType  : set when opening from a bar row left-click (nil for tab right-click)
+-- period     : set when opening from a period tab right-click (nil for bar row)
+local function ShowChannelPicker(anchorRow, armorType, period)
   local picker = GetOrCreateChannelPicker()
   picker.pendingArmorType = armorType
+  picker.pendingPeriod    = period
   picker:ClearAllPoints()
   picker:SetPoint("TOPLEFT", anchorRow, "BOTTOMLEFT", 0, -4)
   picker:Show()
@@ -746,7 +775,7 @@ local function CreateBarRow(parent, width)
     if button == "RightButton" then
       AR.ShowCharPanel(self.armorType, false, self)
     else
-      ShowChannelPicker(self, self.armorType)
+      ShowChannelPicker(self, self.armorType, nil)
     end
   end)
 
@@ -935,7 +964,18 @@ local function CreatePeriodTabs(parent, onSelect)
       end
     end
 
-    tab:SetScript("OnClick", function(self)
+    -- Register for both mouse buttons so right-click reaches OnClick.
+    tab:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+
+    tab:SetScript("OnClick", function(self, button)
+      -- Right-click: share the account total for this tab's period via channel picker.
+      if button == "RightButton" then
+        GameTooltip:Hide()
+        PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+        ShowChannelPicker(self, nil, self.period)
+        return
+      end
+      -- Left-click: switch the active period as before.
       AR.currentPeriod = self.period
       AccountRepairedPopupDB.period = self.period
       PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
@@ -947,6 +987,8 @@ local function CreatePeriodTabs(parent, onSelect)
       GameTooltip:SetOwner(self, "ANCHOR_TOP")
       GameTooltip:AddLine(GetPeriodLabel(self.period), 1, 1, 1)
       GameTooltip:AddLine(GetPeriodContextLabel(self.period), 0.6, 0.6, 0.6)
+      GameTooltip:AddLine(" ")
+      GameTooltip:AddLine(L["RCLICK_SHARE_TOTAL"] or "Right-click to share account total", 0.5, 0.5, 0.5)
       GameTooltip:Show()
     end)
 
