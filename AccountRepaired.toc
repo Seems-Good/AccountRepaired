@@ -1,4 +1,4 @@
-## Interface: 120000, 120001, 120005, 120007
+## Interface: 120000, 120001, 120005, 120007, 120100
 ## Version: @project-version@
 ## Title: Account Repaired
 ## Notes: Track gold spent on repairs per character, grouped by armor type (/arepaired)
